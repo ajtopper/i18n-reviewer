@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
-from PySide6.QtCore import QModelIndex, Qt
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QEvent, QModelIndex, QObject, QTimer, Qt
+from PySide6.QtGui import QAction, QKeyEvent, QKeySequence, QUndoStack
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -15,9 +16,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSplitter,
     QStatusBar,
@@ -35,8 +40,14 @@ from app.core.project_manager import (
     discover_manifest,
     load_package_session,
 )
+from app.ui.commands import (
+    EditCellCommand,
+    RevertCellCommand,
+    ReviewCellCommand,
+    ToggleOrphanDeletionCommand,
+)
 from app.ui.delegates import StatusCellDelegate
-from app.ui.table_model import PackageFilterProxyModel, TranslationTableModel
+from app.ui.table_model import PackageFilterProxyModel, StatusFilterMode, TranslationTableModel
 
 
 class OpenPackageDialog(QDialog):
@@ -123,6 +134,54 @@ class OpenPackageDialog(QDialog):
         return chosen
 
 
+class ExpandedEditorDialog(QDialog):
+    """Side-by-side Base x Translation editor for long or multi-line strings (Shift+F2)."""
+
+    def __init__(
+        self,
+        base_text: str,
+        target_text: str,
+        key_path: str,
+        lang: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Editor Expandido — {key_path} ({lang})")
+        self.resize(780, 420)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Chave: {key_path} · Idioma: {lang}"))
+
+        cols = QHBoxLayout()
+        left_box = QVBoxLayout()
+        left_box.addWidget(QLabel("Referência (Base):"))
+        self.base_view = QPlainTextEdit()
+        self.base_view.setReadOnly(True)
+        self.base_view.setPlainText(base_text)
+        left_box.addWidget(self.base_view)
+
+        right_box = QVBoxLayout()
+        right_box.addWidget(QLabel(f"Tradução ({lang}):"))
+        self.target_edit = QPlainTextEdit()
+        self.target_edit.setPlainText(target_text)
+        right_box.addWidget(self.target_edit)
+
+        cols.addLayout(left_box, 1)
+        cols.addLayout(right_box, 1)
+        layout.addLayout(cols, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.target_edit.setFocus()
+
+    def edited_text(self) -> str:
+        return self.target_edit.toPlainText()
+
+
 class MainWindow(QMainWindow):
     """Main desktop window displaying multilingual translation table and inspector."""
 
@@ -134,12 +193,20 @@ class MainWindow(QMainWindow):
         self.lang_checkboxes: dict[str, QCheckBox] = {}
         self._lang_actions: list[QAction] = []
 
-        self.table_model = TranslationTableModel()
+        self.undo_stack = QUndoStack(self)
+        self.table_model = TranslationTableModel(undo_stack=self.undo_stack)
         self.proxy_model = PackageFilterProxyModel()
         self.proxy_model.setSourceModel(self.table_model)
 
+        self.search_debounce = QTimer(self)
+        self.search_debounce.setSingleShot(True)
+        self.search_debounce.setInterval(150)
+        self.search_debounce.timeout.connect(self._apply_debounced_search)
+
         self._build_toolbar()
         self._build_central()
+        self._bind_shortcuts()
+        self.table_model.cell_edited.connect(self._on_cell_edited)
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Abra um module.json ou system.json do Foundry para começar.")
 
@@ -151,7 +218,30 @@ class MainWindow(QMainWindow):
         self.open_action = QAction("Abrir Pacote...", self)
         self.open_action.triggered.connect(self._on_open_package_clicked)
         self.toolbar.addAction(self.open_action)
+
+        undo_action = self.undo_stack.createUndoAction(self, "Desfazer")
+        undo_action.setShortcuts([QKeySequence(QKeySequence.StandardKey.Undo), QKeySequence("Ctrl+Z")])
+        redo_action = self.undo_stack.createRedoAction(self, "Refazer")
+        redo_action.setShortcuts([QKeySequence(QKeySequence.StandardKey.Redo), QKeySequence("Ctrl+Y")])
+        self.undo_action = undo_action
+        self.redo_action = redo_action
+        self.toolbar.addAction(undo_action)
+        self.toolbar.addAction(redo_action)
         self.toolbar.addSeparator()
+
+        self.toolbar.addWidget(QLabel(" Filtro: "))
+        self.status_filter_combo = QComboBox()
+        self.status_filter_combo.addItem("Todas", "all")
+        self.status_filter_combo.addItem("Apenas Pendentes", "pending")
+        self.status_filter_combo.addItem("Apenas Editadas", "edited")
+        self.status_filter_combo.currentIndexChanged.connect(self._on_status_filter_changed)
+        self.toolbar.addWidget(self.status_filter_combo)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Buscar chave ou texto (Ctrl+F)...")
+        self.search_input.setMaximumWidth(230)
+        self.search_input.textChanged.connect(lambda _: self.search_debounce.start())
+        self.toolbar.addWidget(self.search_input)
 
         self.toolbar.addWidget(QLabel(" Arquivo: "))
         self.file_filter_combo = QComboBox()
@@ -194,11 +284,14 @@ class MainWindow(QMainWindow):
 
         self.table = QTableView()
         self.table.setModel(self.proxy_model)
-        self.table.setItemDelegate(StatusCellDelegate(self.table))
+        self.cell_delegate = StatusCellDelegate(self.table)
+        self.table.setItemDelegate(self.cell_delegate)
         self.table.setWordWrap(True)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.verticalHeader().setMinimumSectionSize(44)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.selectionModel().currentChanged.connect(self._on_current_changed)
 
         self.inspector_panel = QFrame()
@@ -217,11 +310,27 @@ class MainWindow(QMainWindow):
         self.inspector_diag_label = QLabel("")
         self.inspector_diag_label.setWordWrap(True)
 
+        self.btn_review_next = QPushButton("Marcar Revisado + Próxima (Ctrl+Enter)")
+        self.btn_review_next.clicked.connect(self.review_and_advance)
+        self.btn_next_pending = QPushButton("Próxima Pendente (Ctrl+Down)")
+        self.btn_next_pending.clicked.connect(self.jump_to_next_pending)
+        self.btn_expanded_editor = QPushButton("Editor Expandido (Shift+F2)")
+        self.btn_expanded_editor.clicked.connect(self.open_expanded_editor)
+        self.btn_revert_cell = QPushButton("Reverter para produção")
+        self.btn_revert_cell.clicked.connect(self.revert_current_cell)
+        self.btn_orphan_delete = QPushButton("Remover chave órfã...")
+        self.btn_orphan_delete.clicked.connect(self.toggle_orphan_deletion_current_cell)
+
         pv.addWidget(self.inspector_key_label)
         pv.addWidget(self.inspector_origin_label)
         pv.addWidget(self.inspector_state_label)
         pv.addWidget(self.inspector_diag_label)
         pv.addStretch()
+        pv.addWidget(self.btn_review_next)
+        pv.addWidget(self.btn_next_pending)
+        pv.addWidget(self.btn_expanded_editor)
+        pv.addWidget(self.btn_revert_cell)
+        pv.addWidget(self.btn_orphan_delete)
 
         splitter.addWidget(self.table)
         splitter.addWidget(self.inspector_panel)
@@ -229,6 +338,37 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         root_layout.addWidget(splitter, 1)
         self.setCentralWidget(container)
+
+    def _bind_shortcuts(self) -> None:
+        self.installEventFilter(self)
+        self.table.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
+            mods = event.modifiers()
+            key = event.key()
+            ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+            shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+
+            if ctrl and key == Qt.Key.Key_F:
+                self.search_input.setFocus()
+                return True
+            if ctrl and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.review_and_advance()
+                return True
+            if ctrl and key == Qt.Key.Key_Down:
+                self.jump_to_next_pending()
+                return True
+            if shift and key == Qt.Key.Key_F2:
+                self.open_expanded_editor()
+                return True
+            if ctrl and not shift and key == Qt.Key.Key_Z and watched is self.table:
+                self.undo_stack.undo()
+                return True
+            if ctrl and key == Qt.Key.Key_Y and watched is self.table:
+                self.undo_stack.redo()
+                return True
+        return super().eventFilter(watched, event)
 
     def _on_open_package_clicked(self) -> None:
         path_str, _ = QFileDialog.getOpenFileName(
@@ -268,6 +408,8 @@ class MainWindow(QMainWindow):
 
     def load_session(self, session: PackageSession) -> None:
         self.session = session
+        self.undo_stack.clear()
+        self.cell_delegate.invalidate_cache()
         self.table_model.set_session(session)
         self.setWindowTitle(f"i18n Reviewer — {session.manifest.package_id}")
 
@@ -328,22 +470,186 @@ class MainWindow(QMainWindow):
 
     def _refresh_statusbar(self, session: PackageSession) -> None:
         total_keys = len(session.rows)
+        reviewed_count = sum(
+            1 for r in session.rows for c in r.cells.values() if c.review_status == "reviewed"
+        )
+        dirty_count = sum(
+            1 for r in session.rows for c in r.cells.values() if c.is_dirty
+        )
         missing_count = sum(
-            1 for r in session.rows for c in r.cells.values() if c.kind == CellKind.MISSING
+            1 for r in session.rows for c in r.cells.values() if c.is_missing
         )
         orphan_count = sum(
             1 for r in session.rows for c in r.cells.values() if c.kind == CellKind.ORPHAN
         )
         diag_count = len(session.warnings) + sum(len(v) for v in session.file_diagnostics.values())
         self.statusBar().showMessage(
-            f"{total_keys} chaves · {missing_count} missing · {orphan_count} órfãs · {diag_count} avisos/erros"
+            f"{total_keys} chaves · {reviewed_count} revisadas · {dirty_count} editadas · "
+            f"{missing_count} missing · {orphan_count} órfãs · {diag_count} avisos/erros"
         )
+
+    def _on_status_filter_changed(self) -> None:
+        mode = cast(StatusFilterMode, self.status_filter_combo.currentData() or "all")
+        self.proxy_model.set_status_filter(mode)
+
+    def _apply_debounced_search(self) -> None:
+        self.proxy_model.set_search_query(self.search_input.text())
 
     def _on_file_filter_changed(self) -> None:
         self.proxy_model.set_file_filter(self.file_filter_combo.currentData())
 
     def _toggle_inspector(self, checked: bool) -> None:
         self.inspector_panel.setVisible(checked)
+
+    def _current_source_pos(self) -> tuple[int, int] | None:
+        cur = self.table.currentIndex()
+        if not cur.isValid():
+            return None
+        src = self.proxy_model.mapToSource(cur)
+        if not src.isValid():
+            return None
+        return src.row(), src.column()
+
+    def mark_current_reviewed(self) -> bool:
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2:
+            return False
+        row, col = pos
+        cell = self.table_model.get_cell(row, col)
+        if cell is None or not cell.can_mark_reviewed():
+            return False
+        self.undo_stack.push(
+            ReviewCellCommand(cell, row, col, self.table_model.notify_cell_changed)
+        )
+        return True
+
+    def review_and_advance(self) -> None:
+        self.mark_current_reviewed()
+        self.jump_to_next_pending()
+
+    def jump_to_next_pending(self) -> None:
+        current_index = self.table.currentIndex()
+        row_count = self.proxy_model.rowCount()
+        if row_count == 0 or not self.table_model.target_langs:
+            return
+        start_col = current_index.column() if current_index.isValid() and current_index.column() >= 2 else 2
+        start_row = (current_index.row() + 1) if current_index.isValid() else 0
+
+        # Procura primeiro na coluna atual; se não houver pendentes, busca nas demais colunas visíveis
+        visible_cols = [
+            c for c in range(2, self.table_model.columnCount()) if not self.table.isColumnHidden(c)
+        ]
+        ordered_cols = [start_col] + [c for c in visible_cols if c != start_col]
+
+        for col_offset, col in enumerate(ordered_cols):
+            begin_row = start_row if col_offset == 0 else 0
+            for offset in range(row_count):
+                row_idx = (begin_row + offset) % row_count
+                proxy_index = self.proxy_model.index(row_idx, col)
+                source_index = self.proxy_model.mapToSource(proxy_index)
+                cell = self.table_model.get_cell(source_index.row(), col)
+                if cell is not None and cell.is_pending:
+                    self.table.setCurrentIndex(proxy_index)
+                    self.table.scrollTo(proxy_index)
+                    return
+
+    def revert_current_cell(self) -> None:
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2:
+            return
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        if row_data is None or cell is None or not cell.is_dirty:
+            return
+        self.undo_stack.push(
+            RevertCellCommand(cell, row_data.base_text, row, col, self.table_model.notify_cell_changed)
+        )
+
+    def toggle_orphan_deletion_current_cell(self) -> None:
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2:
+            return
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        if row_data is None or cell is None or cell.readonly or cell.kind != CellKind.ORPHAN:
+            return
+        target_flag = not cell.marked_for_deletion
+        prompt = (
+            f"Marcar a chave órfã '{row_data.key_path}' para remoção no próximo envio para produção?"
+            if target_flag
+            else f"Cancelar a remoção da chave órfã '{row_data.key_path}'?"
+        )
+        ans = QMessageBox.question(self, "Remover chave órfã", prompt)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.undo_stack.push(
+            ToggleOrphanDeletionCommand(cell, target_flag, row, col, self.table_model.notify_cell_changed)
+        )
+
+    def open_expanded_editor(self) -> None:
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2 or self.session is None:
+            return
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        if row_data is None or cell is None or not cell.can_edit():
+            return
+        lang = self.session.target_langs[col - 2]
+        dlg = ExpandedEditorDialog(
+            row_data.base_text or "",
+            cell.local_value or "",
+            row_data.key_path,
+            lang,
+            self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_val = dlg.edited_text()
+            if cell.will_apply_edit(new_val):
+                self.undo_stack.push(
+                    EditCellCommand(
+                        cell=cell,
+                        base_text=row_data.base_text,
+                        new_value=new_val,
+                        row=row,
+                        col=col,
+                        notify=self.table_model.notify_cell_changed,
+                    )
+                )
+
+    def _on_context_menu(self, pos: object) -> None:
+        from PySide6.QtCore import QPoint
+
+        if not isinstance(pos, QPoint):
+            return
+        proxy_index = self.table.indexAt(pos)
+        if not proxy_index.isValid():
+            return
+        self.table.setCurrentIndex(proxy_index)
+        source_index = self.proxy_model.mapToSource(proxy_index)
+        if not source_index.isValid() or source_index.column() < 2:
+            return
+        cell = self.table_model.get_cell(source_index.row(), source_index.column())
+        if cell is None:
+            return
+
+        menu = QMenu(self)
+        menu.addAction("Marcar como Revisado", self.mark_current_reviewed)
+        menu.addAction("Marcar Revisado + Próxima (Ctrl+Enter)", self.review_and_advance)
+        menu.addAction("Editor Expandido (Shift+F2)...", self.open_expanded_editor)
+        if cell.is_dirty:
+            menu.addAction("Reverter para produção", self.revert_current_cell)
+        if cell.kind == CellKind.ORPHAN and not cell.readonly:
+            label = "Cancelar remoção de órfã" if cell.marked_for_deletion else "Remover chave órfã..."
+            menu.addAction(label, self.toggle_orphan_deletion_current_cell)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _on_cell_edited(self, _row: int, _col: int) -> None:
+        if self.session is not None:
+            self._refresh_statusbar(self.session)
+        self._on_current_changed(self.table.currentIndex(), QModelIndex())
 
     def _on_current_changed(self, current: QModelIndex, _prev: QModelIndex) -> None:
         if self.session is None or not current.isValid():
@@ -375,8 +681,9 @@ class MainWindow(QMainWindow):
         origin = cell.source_file or row_data.base_source_file or "(desconhecido)"
         line_info = f" (linha {cell.line})" if cell.line else ""
         self.inspector_origin_label.setText(f"Origem: {origin}{line_info}")
+        dirty_str = "Sim" if cell.is_dirty else "Não"
         self.inspector_state_label.setText(
-            f"Estado: {cell.kind.name} · Somente leitura: {'Sim' if cell.readonly else 'Não'}"
+            f"Estado: {cell.kind.name} · Revisão: {cell.review_status} · Dirty: {dirty_str}"
         )
 
         diags: list[str] = []

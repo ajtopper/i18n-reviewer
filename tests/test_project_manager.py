@@ -200,3 +200,77 @@ def test_cldr_plurals_are_isolated_per_target_language(tmp_path: Path) -> None:
     assert rows2["Pts.many"].cells["pt-BR"].kind == CellKind.MISSING
     assert rows2["Pts.many"].cells["de"].kind == CellKind.NOT_APPLICABLE
 
+
+def test_cell_state_machine_transitions_edit_review_revert_and_orphan_deletion() -> None:
+    from app.core.project_manager import CellData
+
+    # 1) Editar célula existente torna is_dirty=True e rebaixa review_status para unreviewed
+    cell = CellData(prod_value="Olá", local_value="Olá", kind=CellKind.TRANSLATED)
+    assert cell.is_dirty is False
+    assert cell.mark_reviewed() is True
+    assert cell.review_status == "reviewed"
+
+    assert cell.apply_edit("Oi", base_text="Hello") is True
+    assert cell.is_dirty is True
+    assert cell.review_status == "unreviewed"
+
+    # Editar de volta ao valor idêntico ao prod_value limpa is_dirty automaticamente
+    assert cell.apply_edit("Olá", base_text="Hello") is True
+    assert cell.is_dirty is False
+
+    # 2) Editar célula MISSING preenche local_value e sai de MISSING; cancelar vazio não cria chave
+    missing = CellData(prod_value=None, local_value=None, kind=CellKind.MISSING)
+    assert missing.is_missing is True
+    assert missing.mark_reviewed() is False
+    assert missing.apply_edit("", base_text="Bye") is False
+    assert missing.apply_edit("Tchau", base_text="Bye") is True
+    assert missing.is_missing is False
+    assert missing.is_dirty is True
+    assert missing.kind == CellKind.TRANSLATED
+    assert missing.mark_reviewed() is True
+    assert missing.review_status == "reviewed"
+
+    # Reverter restaura para MISSING
+    missing.revert_to_production(base_text="Bye")
+    assert missing.is_missing is True
+    assert missing.is_dirty is False
+    assert missing.kind == CellKind.MISSING
+
+    # 3) Remoção de órfã torna is_dirty=True e não permite revisão enquanto marcada
+    orphan = CellData(prod_value="Antiga", local_value="Antiga", kind=CellKind.ORPHAN)
+    assert orphan.set_marked_for_deletion(True) is True
+    assert orphan.is_dirty is True
+    assert orphan.mark_reviewed() is False
+    assert orphan.set_marked_for_deletion(False) is True
+    assert orphan.is_dirty is False
+
+    # 4) Estado stale e bloqueios de edição/revisão
+    stale = CellData(
+        prod_value="Texto",
+        local_value="Texto",
+        kind=CellKind.TRANSLATED,
+        review_status="stale",
+        previous_base="Old base",
+    )
+    assert stale.is_pending is True
+    assert stale.mark_reviewed() is True
+    assert stale.review_status == "reviewed"
+    assert stale.previous_base is None
+
+    stale.review_status = "stale"
+    stale.previous_base = "Old base"
+    assert stale.apply_edit("Texto ajustado", base_text="New base") is True
+    assert stale.review_status == "unreviewed"
+
+    for locked_kind in (CellKind.NON_STRING, CellKind.STRUCTURAL_CONFLICT, CellKind.NOT_APPLICABLE):
+        locked = CellData(prod_value="x", local_value="x", kind=locked_kind)
+        assert locked.can_edit() is False
+        assert locked.apply_edit("y", base_text="b") is False
+        assert locked.mark_reviewed() is False
+
+    ro = CellData(prod_value="x", local_value="x", kind=CellKind.TRANSLATED, readonly=True)
+    assert ro.can_edit() is False
+    assert ro.apply_edit("y", base_text="b") is False
+    assert ro.mark_reviewed() is False
+
+

@@ -34,6 +34,7 @@ ManifestWarningKind = Literal[
     "multi_file_collision",
     "fatal_file",
 ]
+ReviewStatus = Literal["unreviewed", "reviewed", "stale"]
 
 
 class CellKind(str, Enum):
@@ -86,9 +87,20 @@ class ManifestInfo:
     warnings: list[ManifestWarning]
 
 
+@dataclass(frozen=True)
+class CellSnapshot:
+    """Captured state of a CellData for undo/redo restoration."""
+
+    local_value: str | None
+    review_status: ReviewStatus
+    previous_base: str | None
+    kind: CellKind
+    marked_for_deletion: bool
+
+
 @dataclass
 class CellData:
-    """Read-model state for a single (key_path, target_lang) cell."""
+    """State machine and read-model for a single (key_path, target_lang) cell."""
 
     prod_value: str | None
     local_value: str | None
@@ -98,6 +110,121 @@ class CellData:
     raw_type: str = "str"
     readonly: bool = False
     is_plural_suggestion: bool = False
+    marked_for_deletion: bool = False
+    review_status: ReviewStatus = "unreviewed"
+    previous_base: str | None = None
+
+    @property
+    def is_missing(self) -> bool:
+        return self.local_value is None
+
+    @property
+    def is_dirty(self) -> bool:
+        return (self.local_value != self.prod_value) or self.marked_for_deletion
+
+    @property
+    def is_pending(self) -> bool:
+        if self.kind in (CellKind.NOT_APPLICABLE, CellKind.NON_STRING, CellKind.STRUCTURAL_CONFLICT):
+            return False
+        if self.marked_for_deletion:
+            return False
+        return (
+            self.is_missing
+            or self.kind == CellKind.EMPTY
+            or self.review_status in ("unreviewed", "stale")
+        )
+
+    def can_edit(self) -> bool:
+        """True if the user is allowed to edit this cell's text."""
+        return not (
+            self.readonly
+            or self.marked_for_deletion
+            or self.kind in (CellKind.NON_STRING, CellKind.STRUCTURAL_CONFLICT, CellKind.NOT_APPLICABLE)
+        )
+
+    def can_mark_reviewed(self) -> bool:
+        """True if the cell can be explicitly approved as reviewed."""
+        return self.can_edit() and not self.is_missing
+
+    def will_apply_edit(self, new_value: str | None) -> bool:
+        """True if applying new_value would actually change this cell."""
+        if not self.can_edit():
+            return False
+        if self.prod_value is None and (new_value is None or new_value == ""):
+            return self.local_value is not None
+        return new_value != self.local_value
+
+    def snapshot(self) -> CellSnapshot:
+        return CellSnapshot(
+            local_value=self.local_value,
+            review_status=self.review_status,
+            previous_base=self.previous_base,
+            kind=self.kind,
+            marked_for_deletion=self.marked_for_deletion,
+        )
+
+    def restore(self, snap: CellSnapshot) -> None:
+        self.local_value = snap.local_value
+        self.review_status = snap.review_status
+        self.previous_base = snap.previous_base
+        self.kind = snap.kind
+        self.marked_for_deletion = snap.marked_for_deletion
+
+    def _recompute_kind(self, base_text: str | None) -> None:
+        if self.kind == CellKind.ORPHAN:
+            return
+        if self.local_value is None:
+            self.kind = CellKind.MISSING
+        elif self.local_value == "":
+            self.kind = CellKind.EMPTY
+        elif base_text is not None and self.local_value == base_text:
+            self.kind = CellKind.SAME_AS_BASE
+        else:
+            self.kind = CellKind.TRANSLATED
+
+    def apply_edit(self, new_value: str | None, base_text: str | None = None) -> bool:
+        """Apply an edit to local_value, updating dirty state and downgrading review_status."""
+        if not self.will_apply_edit(new_value):
+            return False
+        target_val: str | None = (
+            None if (self.prod_value is None and (new_value is None or new_value == "")) else new_value
+        )
+        was_orphan = self.kind == CellKind.ORPHAN
+        self.local_value = target_val
+        if target_val != self.prod_value:
+            self.review_status = "unreviewed"
+        if not was_orphan:
+            self._recompute_kind(base_text)
+        return True
+
+    def mark_reviewed(self) -> bool:
+        """Explicitly approve the current translation unless missing, readonly, or slated for deletion."""
+        if not self.can_mark_reviewed():
+            return False
+        self.review_status = "reviewed"
+        self.previous_base = None
+        return True
+
+    def revert_to_production(self, base_text: str | None = None) -> bool:
+        """Discard local draft and deletion mark, restoring prod_value."""
+        if not self.is_dirty:
+            return False
+        was_orphan = self.kind == CellKind.ORPHAN
+        self.local_value = self.prod_value
+        self.marked_for_deletion = False
+        self.review_status = "unreviewed"
+        if not was_orphan:
+            self._recompute_kind(base_text)
+        return True
+
+    def set_marked_for_deletion(self, flag: bool) -> bool:
+        """Mark or unmark an orphan key for removal in the next production publish."""
+        if self.readonly or self.kind != CellKind.ORPHAN:
+            return False
+        if self.marked_for_deletion == flag:
+            return False
+        self.marked_for_deletion = flag
+        return True
 
 
 @dataclass
@@ -110,6 +237,19 @@ class TableRowData:
     base_line: int = 0
     is_orphan_row: bool = False
     cells: dict[str, CellData] = field(default_factory=dict)
+    _search_blob: str = field(default="", init=False, repr=False)
+
+    def rebuild_search_blob(self) -> None:
+        parts = [self.key_path.lower(), (self.base_text or "").lower()]
+        for cell in self.cells.values():
+            if cell.local_value:
+                parts.append(cell.local_value.lower())
+        self._search_blob = "\n".join(parts)
+
+    def matches_search(self, query_lower: str) -> bool:
+        if not self._search_blob:
+            self.rebuild_search_blob()
+        return query_lower in self._search_blob
 
 
 @dataclass

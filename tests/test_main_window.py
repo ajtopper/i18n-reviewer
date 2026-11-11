@@ -1,9 +1,13 @@
 import json
 from pathlib import Path
+import time
 
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QMessageBox, QStyleOptionViewItem
 from pytestqt.qtbot import QtBot
 
-from app.ui.main_window import MainWindow
+from app.core.project_manager import CellData, CellKind, PackageSession, TableRowData, discover_manifest
+from app.ui.main_window import ExpandedEditorDialog, MainWindow
 
 
 def _write_json(path: Path, data: object) -> None:
@@ -88,4 +92,223 @@ def test_main_window_opens_package_displays_columns_inspector_and_file_filter(
 
     # Rodapé numérico preenchido
     assert "4 chaves" in win.statusBar().currentMessage()
+
+
+def test_ticket02_editing_status_filters_search_undo_shortcuts_and_orphan_removal(
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    pkg = tmp_path / "edit-mod"
+    _write_json(
+        pkg / "module.json",
+        {
+            "id": "edit-mod",
+            "languages": [
+                {"lang": "en", "name": "English", "path": "lang/en.json"},
+                {"lang": "pt-BR", "name": "Português", "path": "lang/pt-BR.json"},
+            ],
+        },
+    )
+    _write_json(
+        pkg / "lang/en.json",
+        {
+            "K1": "Hello",
+            "K2": "World",
+            "K3": "Missing key",
+        },
+    )
+    _write_json(
+        pkg / "lang/pt-BR.json",
+        {
+            "K1": "Olá",
+            "K2": "Mundo",
+            "OLD": "Órfã antiga",
+        },
+    )
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.open_package_manifest(pkg / "module.json")
+
+    model = win.table_model
+    proxy = win.proxy_model
+
+    # 1) Editar K1 inline (via setData) -> vira EDITADO (is_dirty=True, unreviewed) e entra no QUndoStack
+    idx_k1 = proxy.index(0, 2)
+    assert bool(model.flags(proxy.mapToSource(idx_k1)) & Qt.ItemFlag.ItemIsEditable) is True
+    assert proxy.setData(idx_k1, "Oi", Qt.ItemDataRole.EditRole) is True
+    c1 = model.get_cell(0, 2)
+    assert c1 is not None and c1.local_value == "Oi" and c1.is_dirty is True and c1.review_status == "unreviewed"
+
+    # Ctrl+Z desfaz e Ctrl+Y refaz
+    win.undo_stack.undo()
+    assert c1.local_value == "Olá" and c1.is_dirty is False
+    win.undo_stack.redo()
+    assert c1.local_value == "Oi" and c1.is_dirty is True
+
+    # 2) Marcar K1 como revisado com Ctrl+Enter -> vira reviewed + mantém dirty (EDITADO · OK) e pula para K2
+    win.table.setCurrentIndex(idx_k1)
+    win.review_and_advance()
+    assert c1.review_status == "reviewed" and c1.is_dirty is True
+    cur_src = proxy.mapToSource(win.table.currentIndex())
+    assert model.rows[cur_src.row()].key_path == "K2"
+
+    # Ctrl+Down pula para próxima pendente (K3) sem alterar K2
+    win.jump_to_next_pending()
+    cur_src = proxy.mapToSource(win.table.currentIndex())
+    assert model.rows[cur_src.row()].key_path == "K3"
+    c2 = model.get_cell(1, 2)
+    assert c2 is not None and c2.review_status == "unreviewed"
+
+    # 3) Filtros: Apenas Editadas -> só K1; Apenas Pendentes -> K2, K3, OLD
+    edit_idx = win.status_filter_combo.findData("edited")
+    assert edit_idx >= 0
+    win.status_filter_combo.setCurrentIndex(edit_idx)
+    assert proxy.rowCount() == 1
+    assert model.rows[proxy.mapToSource(proxy.index(0, 0)).row()].key_path == "K1"
+
+    pend_idx = win.status_filter_combo.findData("pending")
+    assert pend_idx >= 0
+    win.status_filter_combo.setCurrentIndex(pend_idx)
+    pend_keys = {model.rows[proxy.mapToSource(proxy.index(r, 0)).row()].key_path for r in range(proxy.rowCount())}
+    assert pend_keys == {"K2", "K3", "OLD"}
+
+    all_idx = win.status_filter_combo.findData("all")
+    win.status_filter_combo.setCurrentIndex(all_idx)
+
+    # 4) Busca com debounce 150ms
+    win.search_input.setText("Mundo")
+    qtbot.waitUntil(lambda: proxy.rowCount() == 1, timeout=1000)
+    assert model.rows[proxy.mapToSource(proxy.index(0, 0)).row()].key_path == "K2"
+    win.search_input.clear()
+    qtbot.waitUntil(lambda: proxy.rowCount() == 4, timeout=1000)
+
+    # 5) Reverter K1 para produção via comando Undoable
+    win.table.setCurrentIndex(proxy.index(0, 2))
+    win.revert_current_cell()
+    assert c1.local_value == "Olá" and c1.is_dirty is False
+    win.undo_stack.undo()
+    assert c1.local_value == "Oi" and c1.is_dirty is True
+
+    # 6) Marcar órfã OLD para remoção com confirmação explícita
+    old_row = next(i for i, r in enumerate(model.rows) if r.key_path == "OLD")
+    win.table.setCurrentIndex(proxy.index(old_row, 2))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.StandardButton.Yes)  # type: ignore[attr-defined]
+    win.toggle_orphan_deletion_current_cell()
+    c_old = model.get_cell(old_row, 2)
+    assert c_old is not None and c_old.marked_for_deletion is True and c_old.is_dirty is True
+    win.undo_stack.undo()
+    assert c_old.marked_for_deletion is False
+
+    # 7) Editor expandido integrado com QUndoStack + atalhos reais Ctrl+Z / Ctrl+Y / Ctrl+F / Ctrl+Down
+    win.show()
+    qtbot.waitExposed(win)
+    win.activateWindow()
+    win.table.setFocus()
+    win.table.setCurrentIndex(proxy.index(0, 2))
+    monkeypatch.setattr(ExpandedEditorDialog, "exec", lambda self: ExpandedEditorDialog.DialogCode.Accepted)
+    monkeypatch.setattr(ExpandedEditorDialog, "edited_text", lambda self: "Olá expandido")
+    qtbot.keyClick(win.table, Qt.Key.Key_F2, Qt.KeyboardModifier.ShiftModifier)
+    assert c1.local_value == "Olá expandido"
+
+    qtbot.keyClick(win.table, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert c1.local_value == "Oi"
+    qtbot.keyClick(win.table, Qt.Key.Key_Y, Qt.KeyboardModifier.ControlModifier)
+    assert c1.local_value == "Olá expandido"
+
+    # Ctrl+F foca o campo de busca
+    qtbot.keyClick(win.table, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+    qtbot.waitUntil(win.search_input.hasFocus, timeout=500)
+
+
+def test_ticket02_pending_filter_includes_stale_empty_and_jumps_across_columns(
+    qtbot: QtBot,
+    tmp_path: Path,
+) -> None:
+    pkg = tmp_path / "multi-pending"
+    _write_json(
+        pkg / "module.json",
+        {
+            "id": "multi-pending",
+            "languages": [
+                {"lang": "en", "path": "lang/en.json"},
+                {"lang": "pt-BR", "path": "lang/pt-BR.json"},
+                {"lang": "es", "path": "lang/es.json"},
+            ],
+        },
+    )
+    _write_json(pkg / "lang/en.json", {"A": "One", "B": "Two"})
+    _write_json(pkg / "lang/pt-BR.json", {"A": "Um", "B": "Dois"})
+    _write_json(pkg / "lang/es.json", {"A": "", "B": "Dos"})
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.open_package_manifest(pkg / "module.json")
+
+    # Marca pt-BR inteiro como reviewed (sem pendentes em pt-BR), B em es também reviewed;
+    # A em pt-BR fica stale e A em es tem string vazia ""
+    c_pt_a = win.table_model.get_cell(0, 2)
+    c_pt_b = win.table_model.get_cell(1, 2)
+    c_es_b = win.table_model.get_cell(1, 3)
+    assert c_pt_a and c_pt_b and c_es_b
+    c_pt_a.review_status = "stale"
+    c_pt_b.mark_reviewed()
+    c_es_b.mark_reviewed()
+
+    pend_idx = win.status_filter_combo.findData("pending")
+    win.status_filter_combo.setCurrentIndex(pend_idx)
+    assert win.proxy_model.rowCount() == 1  # Apenas linha A (stale em pt-BR e "" em es)
+
+    # Sem pendentes em pt-BR após aprovar A em pt-BR -> jump_to_next_pending salta para coluna es!
+    c_pt_a.mark_reviewed()
+    win.table.setCurrentIndex(win.proxy_model.index(0, 2))
+    win.jump_to_next_pending()
+    assert win.table.currentIndex().column() == 3
+
+
+def test_ticket02_row_height_cap_and_10k_scale(qtbot: QtBot, tmp_path: Path) -> None:
+    pkg = tmp_path / "scale-mod"
+    _write_json(pkg / "module.json", {"id": "scale-mod", "languages": [{"lang": "en", "path": "lang/en.json"}]})
+    _write_json(pkg / "lang/en.json", {"A": "One"})
+    manifest = discover_manifest(pkg / "module.json")
+
+    rows: list[TableRowData] = []
+    for i in range(10000):
+        long_text = "Linha longa " + ("palavra " * 40) if i == 0 else f"Value {i}"
+        rows.append(
+            TableRowData(
+                key_path=f"MOD.Key{i}",
+                base_text=f"Base {i}",
+                cells={"pt-BR": CellData(prod_value=long_text, local_value=long_text, kind=CellKind.TRANSLATED)},
+            )
+        )
+    session = PackageSession(
+        manifest=manifest,
+        base_lang="en",
+        base_external_path=None,
+        target_langs=["pt-BR"],
+        files=[],
+        rows=rows,
+        warnings=[],
+    )
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    t0 = time.perf_counter()
+    win.load_session(session)
+    win.search_input.setText("Key9999")
+    qtbot.waitUntil(lambda: win.proxy_model.rowCount() == 1, timeout=1000)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 2.0
+
+    # Confirma teto de altura (~110 px) para célula com texto gigante
+    win.search_input.clear()
+    qtbot.waitUntil(lambda: win.proxy_model.rowCount() == 10000, timeout=1000)
+    delegate = win.table.itemDelegate()
+    opt = QStyleOptionViewItem()
+    opt.rect.setWidth(240)
+    sz = delegate.sizeHint(opt, win.proxy_model.index(0, 2))
+    assert sz.height() <= 115
+
 
