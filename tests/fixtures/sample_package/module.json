@@ -1,0 +1,12 @@
+{
+  "id": "sample-foundry-pkg",
+  "title": "Sample Foundry Package",
+  "languages": [
+    {"lang": "en", "name": "English", "path": "lang/en-canonical.json"},
+    {"lang": "en", "name": "English Mixed", "path": "lang/en-mixed-noncanon.json"},
+    {"lang": "pt-BR", "name": "Português (Brasil)", "path": "lang/pt-BR.json"},
+    {"lang": "es", "name": "Español", "path": "lang/es-duplicate.json"},
+    {"lang": "fr", "name": "Français", "path": "lang/fr-fatal.json"}
+  ]
+}
+

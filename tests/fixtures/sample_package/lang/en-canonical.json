@@ -1,0 +1,10 @@
+{
+  "APP": {
+    "Title": "Sample App",
+    "Points": {
+      "one": "{n} point",
+      "other": "{n} points"
+    }
+  }
+}
+
