@@ -10,6 +10,8 @@ Uma **spec de implementação travada** do i18n Reviewer: todas as decisões de 
 resolvidas, pronta para ser fatiada em tickets de build (`to-spec` / `to-tickets`). O mapa termina quando não
 resta nada a decidir antes de alguém começar a codar.
 
+> **Concluído:** especificação final publicada em [docs/spec-implementacao.md](../docs/spec-implementacao.md) (`labels: [ready-for-agent, spec]`).
+
 ## Notes
 
 - **Entrada:** [Especificação Técnica Inicial](../docs/spec-inicial.md). Decisões nos tickets prevalecem sobre ela.
