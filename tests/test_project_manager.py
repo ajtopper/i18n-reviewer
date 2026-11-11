@@ -1,10 +1,20 @@
 import json
 from pathlib import Path
+import shutil
+
+import pytest
 
 from app.core.project_manager import (
     CellKind,
+    PackageNotFoundError,
+    UnsupportedProjectVersionError,
+    clear_recovery_draft,
     discover_manifest,
+    has_recovery_draft,
     load_package_session,
+    load_project_file,
+    save_project_file,
+    write_recovery_draft,
 )
 
 
@@ -272,5 +282,187 @@ def test_cell_state_machine_transitions_edit_review_revert_and_orphan_deletion()
     assert ro.can_edit() is False
     assert ro.apply_edit("y", base_text="b") is False
     assert ro.mark_reviewed() is False
+
+
+def test_save_and_load_i18nproj_portability_versioning_and_recovery(tmp_path: Path) -> None:
+    app_data = tmp_path / "appdata"
+    workspace = tmp_path / "ws1"
+    pkg = workspace / "my-mod"
+    _write_json(
+        pkg / "module.json",
+        {
+            "id": "my-mod",
+            "languages": [
+                {"lang": "en", "path": "lang/en.json"},
+                {"lang": "pt-BR", "path": "lang/pt-BR.json"},
+            ],
+        },
+    )
+    _write_json(pkg / "lang/en.json", {"A": "One", "B": "Two"})
+    _write_json(pkg / "lang/pt-BR.json", {"A": "Um", "OLD": "Velha"})
+
+    info = discover_manifest(pkg / "module.json")
+    session = load_package_session(info)
+    rows = {r.key_path: r for r in session.rows}
+    rows["A"].cells["pt-BR"].mark_reviewed()
+    rows["B"].cells["pt-BR"].apply_edit("Dois", base_text="Two")
+    rows["OLD"].cells["pt-BR"].set_marked_for_deletion(True)
+
+    proj_path = workspace / "projects" / "my-mod.i18nproj"
+    save_project_file(session, proj_path, app_data_dir=app_data)
+
+    # Arquivo .i18nproj gravado com schema_version=1 e snapshots SHA-256
+    raw_proj = json.loads(proj_path.read_text(encoding="utf-8"))
+    assert raw_proj["schema_version"] == 1
+    assert raw_proj["project_id"] == session.project_id
+    assert raw_proj["drafts"]["edits"]["pt-BR"] == {"B": "Dois"}
+    assert raw_proj["drafts"]["deletions"]["pt-BR"] == ["OLD"]
+    assert raw_proj["review_state"]["pt-BR"]["A"]["status"] == "reviewed"
+
+    # Portabilidade: move workspace inteiro para ws2 -> caminho relativo continua resolvendo!
+    ws2 = tmp_path / "ws2"
+    shutil.move(str(workspace), str(ws2))
+    moved_proj = ws2 / "projects" / "my-mod.i18nproj"
+    reopened = load_project_file(moved_proj)
+    r_rows = {r.key_path: r for r in reopened.session.rows}
+    assert r_rows["A"].cells["pt-BR"].review_status == "reviewed"
+    assert r_rows["B"].cells["pt-BR"].local_value == "Dois"
+    assert r_rows["B"].cells["pt-BR"].is_dirty is True
+    assert r_rows["OLD"].cells["pt-BR"].marked_for_deletion is True
+
+    # Se mover apenas o .i18nproj e apagar ws2/my-mod original, pede relocalização e aceita relocated_root
+    relocated_pkg = tmp_path / "relocated-pkg"
+    shutil.move(str(ws2 / "my-mod"), str(relocated_pkg))
+    with pytest.raises(PackageNotFoundError):
+        load_project_file(moved_proj)
+    reopened_reloc = load_project_file(moved_proj, relocated_root=relocated_pkg)
+    assert reopened_reloc.session.manifest.package_root == relocated_pkg.resolve()
+
+    # Migração de versão antiga (0 -> 1) cria backup do .i18nproj antes
+    old_data = json.loads(moved_proj.read_text(encoding="utf-8"))
+    old_data["schema_version"] = 0
+    moved_proj.write_text(json.dumps(old_data), encoding="utf-8")
+    migrated = load_project_file(moved_proj, relocated_root=relocated_pkg)
+    assert migrated.migrated_from == 0
+    assert (moved_proj.parent / f"{moved_proj.name}.v0.bak").exists()
+
+    # Versão futura (> 1) é recusada
+    future_data = json.loads(moved_proj.read_text(encoding="utf-8"))
+    future_data["schema_version"] = 99
+    moved_proj.write_text(json.dumps(future_data), encoding="utf-8")
+    with pytest.raises(UnsupportedProjectVersionError):
+        load_project_file(moved_proj, relocated_root=relocated_pkg)
+
+    # Crash recovery: grava rascunho em appdata, detecta e restaura; salvar ou limpar remove recovery
+    moved_proj.write_text(json.dumps(old_data | {"schema_version": 1}), encoding="utf-8")
+    reopened_reloc.session.rows[0].cells["pt-BR"].apply_edit("Um rascunho crash", base_text="One")
+    write_recovery_draft(reopened_reloc.session, app_data_dir=app_data)
+    assert has_recovery_draft(reopened_reloc.session.project_id, app_data_dir=app_data) is True
+    recovered = load_project_file(moved_proj, relocated_root=relocated_pkg, apply_recovery_dir=app_data)
+    assert {r.key_path: r for r in recovered.session.rows}["A"].cells["pt-BR"].local_value == "Um rascunho crash"
+    clear_recovery_draft(reopened_reloc.session.project_id, app_data_dir=app_data)
+    assert has_recovery_draft(reopened_reloc.session.project_id, app_data_dir=app_data) is False
+
+
+def test_three_way_merge_stale_transition_and_invalid_disk_blocking(tmp_path: Path) -> None:
+    from app.core.project_manager import check_external_disk_changes, synchronize_session_with_disk
+
+    pkg = tmp_path / "sync-mod"
+    _write_json(
+        pkg / "module.json",
+        {
+            "id": "sync-mod",
+            "languages": [
+                {"lang": "en", "path": "lang/en.json"},
+                {"lang": "pt-BR", "path": "lang/pt-BR.json"},
+            ],
+        },
+    )
+    _write_json(
+        pkg / "lang/en.json",
+        {
+            "K_AUTO": "Auto",
+            "K_CONV": "Converge",
+            "K_CONF": "Conflict",
+            "K_DEL_CONF": "Deleted remotely",
+            "K_BASE_CHG": "Old English",
+            "K_UNREV": "Old Unrev",
+        },
+    )
+    _write_json(
+        pkg / "lang/pt-BR.json",
+        {
+            "K_AUTO": "Auto prod",
+            "K_CONV": "Conv prod",
+            "K_CONF": "Conf prod",
+            "K_DEL_CONF": "Del prod",
+            "K_BASE_CHG": "Inglês antigo",
+            "K_UNREV": "Não rev",
+        },
+    )
+
+    session = load_package_session(discover_manifest(pkg / "module.json"))
+    rows = {r.key_path: r for r in session.rows}
+    rows["K_AUTO"].cells["pt-BR"].mark_reviewed()
+    rows["K_BASE_CHG"].cells["pt-BR"].mark_reviewed()
+    rows["K_CONV"].cells["pt-BR"].apply_edit("Mesmo do disco", base_text="Converge")
+    rows["K_CONF"].cells["pt-BR"].apply_edit("Minha edição", base_text="Conflict")
+    rows["K_DEL_CONF"].cells["pt-BR"].apply_edit("Editada local", base_text="Deleted remotely")
+
+    proj_path = tmp_path / "sync-mod.i18nproj"
+    save_project_file(session, proj_path)
+
+    # Simula git pull externo nos arquivos de idioma
+    _write_json(
+        pkg / "lang/en.json",
+        {
+            "K_AUTO": "Auto",
+            "K_CONV": "Converge",
+            "K_CONF": "Conflict",
+            "K_DEL_CONF": "Deleted remotely",
+            "K_BASE_CHG": "New English",
+            "K_UNREV": "New Unrev",
+        },
+    )
+    _write_json(
+        pkg / "lang/pt-BR.json",
+        {
+            "K_AUTO": "Auto disco",
+            "K_CONV": "Mesmo do disco",
+            "K_CONF": "Edição do disco",
+            "K_BASE_CHG": "Inglês antigo",
+            "K_UNREV": "Não rev",
+        },
+    )
+
+    assert set(check_external_disk_changes(session)) == {"lang/en.json", "lang/pt-BR.json"}
+    reopened = load_project_file(proj_path)
+    rep = reopened.sync_report
+    assert set(rep.changed_files) == {"lang/en.json", "lang/pt-BR.json"}
+    assert rep.auto_absorbed_count >= 1
+    assert rep.converged_count == 1
+    assert rep.stale_marked_count == 1
+
+    m_rows = {r.key_path: r for r in reopened.session.rows}
+    assert m_rows["K_AUTO"].cells["pt-BR"].local_value == "Auto disco"
+    assert m_rows["K_AUTO"].cells["pt-BR"].review_status == "unreviewed"
+    assert m_rows["K_CONV"].cells["pt-BR"].is_dirty is False
+    assert m_rows["K_BASE_CHG"].cells["pt-BR"].review_status == "stale"
+    assert m_rows["K_BASE_CHG"].cells["pt-BR"].previous_base == "Old English"
+    assert m_rows["K_UNREV"].cells["pt-BR"].review_status == "unreviewed"
+
+    conflicts = {c.key_path: c for c in rep.conflicts}
+    assert set(conflicts.keys()) == {"K_CONF", "K_DEL_CONF"}
+    assert conflicts["K_CONF"].snapshot_value == "Conf prod"
+    assert conflicts["K_CONF"].disk_value == "Edição do disco"
+    assert conflicts["K_CONF"].local_value == "Minha edição"
+    assert conflicts["K_DEL_CONF"].disk_value is None
+
+    # Arquivo inválido no disco bloqueia sincronização ativa
+    (pkg / "lang/pt-BR.json").write_text("{broken json", encoding="utf-8")
+    blocked_rep = synchronize_session_with_disk(session)
+    assert "lang/pt-BR.json" in blocked_rep.blocked_files
+
+
 
 

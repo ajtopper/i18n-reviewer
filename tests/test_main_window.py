@@ -267,6 +267,110 @@ def test_ticket02_pending_filter_includes_stale_empty_and_jumps_across_columns(
     assert win.table.currentIndex().column() == 3
 
 
+def test_ticket03_save_open_unsaved_star_recovery_watcher_conflict_and_stale_inspector(
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    from app.core.project_manager import ConflictResolution, write_recovery_draft
+    from app.ui.conflict_dialog import ConflictResolutionDialog
+
+    app_data = tmp_path / "appdata"
+    pkg = tmp_path / "proj-mod"
+    _write_json(
+        pkg / "module.json",
+        {
+            "id": "proj-mod",
+            "languages": [
+                {"lang": "en", "path": "lang/en.json"},
+                {"lang": "pt-BR", "path": "lang/pt-BR.json"},
+            ],
+        },
+    )
+    _write_json(pkg / "lang/en.json", {"K1": "One", "K2": "Two"})
+    _write_json(pkg / "lang/pt-BR.json", {"K1": "Um", "K2": "Dois", "DEL_CONFLICT": "Velha"})
+
+    win = MainWindow(app_data_dir=app_data)
+    qtbot.addWidget(win)
+    win.open_package_manifest(pkg / "module.json")
+    assert "*" not in win.windowTitle()
+
+    # Editar marca projeto com '*' e grava recovery draft; marca DEL_CONFLICT para remoção
+    assert win.proxy_model.setData(win.proxy_model.index(0, 2), "Um editado", Qt.ItemDataRole.EditRole) is True
+    assert "*" in win.windowTitle()
+    win.mark_current_reviewed()  # K1 reviewed, K2 still unreviewed
+    c_del = win.table_model.get_cell(2, 2)
+    assert c_del is not None
+    c_del.set_marked_for_deletion(True)
+
+    proj_file = tmp_path / "proj-mod.i18nproj"
+    win.save_project(proj_file)
+    assert "*" not in win.windowTitle()
+    assert proj_file.exists()
+    old_hash = win.session.file_snapshots["lang/pt-BR.json"].sha256 if win.session else ""
+
+    # Simula mudança externa no disco enquanto app está aberto: K1 muda base, K1 e DEL_CONFLICT conflitam
+    _write_json(pkg / "lang/en.json", {"K1": "One updated", "K2": "Two"})
+    _write_json(pkg / "lang/pt-BR.json", {"K1": "Um do disco", "K2": "Dois", "DEL_CONFLICT": "Velha atualizada"})
+
+    win.check_for_external_changes()
+    assert win.external_change_banner.isHidden() is False
+
+    # Cancelar o diálogo de conflito NÃO deve atualizar o snapshot nem ocultar o banner
+    monkeypatch.setattr(
+        ConflictResolutionDialog,
+        "exec",
+        lambda self: ConflictResolutionDialog.DialogCode.Rejected,
+    )
+    win.sync_with_disk()
+    assert win.external_change_banner.isHidden() is False
+    assert win.session is not None
+    assert win.session.file_snapshots["lang/pt-BR.json"].sha256 == old_hash
+
+    # Confirmar resolução: aceitar do disco em K1 e editar manualmente DEL_CONFLICT (estava marked_for_deletion=True)
+    monkeypatch.setattr(
+        ConflictResolutionDialog,
+        "exec",
+        lambda self: ConflictResolutionDialog.DialogCode.Accepted,
+    )
+    monkeypatch.setattr(
+        ConflictResolutionDialog,
+        "resolutions",
+        lambda self: [
+            ConflictResolution(key_path="K1", lang="pt-BR", choice="accept_disk", manual_value="Um do disco"),
+            ConflictResolution(key_path="DEL_CONFLICT", lang="pt-BR", choice="manual", manual_value="Resolvida manual"),
+        ],
+    )
+    win.sync_with_disk()
+    assert win.external_change_banner.isHidden() is True
+    c1 = win.table_model.get_cell(0, 2)
+    c_del_after = win.table_model.get_cell(2, 2)
+    assert c1 is not None and c1.local_value == "Um do disco" and c1.is_dirty is False
+    assert c_del_after is not None and c_del_after.marked_for_deletion is False and c_del_after.local_value == "Resolvida manual"
+
+    # Reabre com crash recovery pendente e verifica exibição stale no Inspector
+    assert win.session is not None
+    c1.review_status = "stale"
+    c1.previous_base = "One"
+    win._on_current_changed(win.proxy_model.index(0, 2), win.proxy_model.index(0, 2))
+    assert win.inspector_stale_label.isHidden() is False
+    assert "One" in win.inspector_stale_label.text()
+
+    # Grava recovery simulando fechamento inesperado e aceita restaurar ao reabrir
+    c2 = win.table_model.get_cell(1, 2)
+    assert c2 is not None
+    c2.apply_edit("Dois crash recovery", base_text="Two")
+    write_recovery_draft(win.session, app_data_dir=app_data)
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.StandardButton.Yes)  # type: ignore[attr-defined]
+    win2 = MainWindow(app_data_dir=app_data)
+    qtbot.addWidget(win2)
+    win2.open_project_file(proj_file)
+    c2_reopened = win2.table_model.get_cell(1, 2)
+    assert c2_reopened is not None and c2_reopened.local_value == "Dois crash recovery"
+
+
+
 def test_ticket02_row_height_cap_and_10k_scale(qtbot: QtBot, tmp_path: Path) -> None:
     pkg = tmp_path / "scale-mod"
     _write_json(pkg / "module.json", {"id": "scale-mod", "languages": [{"lang": "en", "path": "lang/en.json"}]})

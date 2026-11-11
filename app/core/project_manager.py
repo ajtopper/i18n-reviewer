@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import hashlib
 import json
 from pathlib import Path
 import re
 from typing import Any, Literal
+import uuid
 
 from app.core.json_handler import (
     DiagnosticIssue,
@@ -253,6 +255,14 @@ class TableRowData:
 
 
 @dataclass
+class FileSnapshot:
+    """Captured disk SHA-256 and string entries for a localization file."""
+
+    sha256: str
+    entries: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class LoadedFileInfo:
     """Loaded localization file together with its parsed diagnostics."""
 
@@ -261,6 +271,7 @@ class LoadedFileInfo:
     document: ParsedLangDocument | None
     conditional: str | None = None
     missing_on_disk: bool = False
+    sha256: str = ""
 
     @property
     def has_fatal_error(self) -> bool:
@@ -283,6 +294,10 @@ class PackageSession:
     file_diagnostics: dict[str, list[DiagnosticIssue]] = field(default_factory=dict)
     lang_conditionals: dict[str, list[str]] = field(default_factory=dict)
     fatal_files_by_lang: dict[str, list[str]] = field(default_factory=dict)
+    project_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    file_snapshots: dict[str, FileSnapshot] = field(default_factory=dict)
+    project_path: Path | None = None
+    enabled_paths: list[str] = field(default_factory=list)
 
 
 def cldr_categories_for_lang(lang: str) -> tuple[str, ...]:
@@ -428,13 +443,15 @@ def _load_single_file(
             conditional=conditional,
             missing_on_disk=True,
         )
-    doc = parse_lang_bytes(file_path.read_bytes(), source_file=rel_path)
+    raw_bytes = file_path.read_bytes()
+    doc = parse_lang_bytes(raw_bytes, source_file=rel_path)
     return LoadedFileInfo(
         lang=lang,
         rel_path=rel_path,
         document=doc,
         conditional=conditional,
         missing_on_disk=False,
+        sha256=hashlib.sha256(raw_bytes).hexdigest(),
     )
 
 
@@ -688,6 +705,18 @@ def load_package_session(
                 )
         rows.append(row)
 
+    file_snapshots: dict[str, FileSnapshot] = {}
+    for lf in loaded_files:
+        if lf.document is not None and lf.document.fatal_error is None:
+            file_snapshots[lf.rel_path] = FileSnapshot(
+                sha256=lf.sha256,
+                entries={
+                    k: e.value
+                    for k, e in lf.document.entries.items()
+                    if e.is_string and e.value is not None
+                },
+            )
+
     return PackageSession(
         manifest=manifest,
         base_lang=effective_base,
@@ -699,6 +728,8 @@ def load_package_session(
         file_diagnostics=file_diagnostics,
         lang_conditionals=lang_conditionals,
         fatal_files_by_lang=fatal_files_by_lang,
+        file_snapshots=file_snapshots,
+        enabled_paths=[e.path for e in chosen],
     )
 
 
@@ -774,3 +805,29 @@ def _build_target_cell(
         readonly=lang_has_fatal,
         is_plural_suggestion=is_plural_suggestion,
     )
+
+
+from app.core.project_storage import (  # noqa: E402, F401
+    CURRENT_SCHEMA_VERSION,
+    ConflictChoice,
+    ConflictResolution,
+    LoadedProjectResult,
+    PackageNotFoundError,
+    SyncConflict,
+    SyncPreview,
+    SyncReport,
+    UnsupportedProjectVersionError,
+    apply_conflict_resolutions,
+    atomic_write_text,
+    check_external_disk_changes,
+    clear_recovery_draft,
+    commit_sync_preview,
+    default_app_data_dir,
+    has_recovery_draft,
+    load_project_file,
+    prepare_disk_sync,
+    resolve_loaded_file_path,
+    save_project_file,
+    synchronize_session_with_disk,
+    write_recovery_draft,
+)

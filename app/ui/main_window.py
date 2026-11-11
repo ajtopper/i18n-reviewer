@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
-from PySide6.QtCore import QEvent, QModelIndex, QObject, QTimer, Qt
-from PySide6.QtGui import QAction, QKeyEvent, QKeySequence, QUndoStack
+from PySide6.QtCore import QEvent, QFileSystemWatcher, QModelIndex, QObject, QTimer, Qt
+from PySide6.QtGui import QAction, QCloseEvent, QKeyEvent, QKeySequence, QUndoStack
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -36,9 +36,23 @@ from app.core.project_manager import (
     CellKind,
     ManifestInfo,
     ManifestLangEntry,
+    PackageNotFoundError,
     PackageSession,
+    SyncConflict,
+    UnsupportedProjectVersionError,
+    apply_conflict_resolutions,
+    check_external_disk_changes,
+    clear_recovery_draft,
+    commit_sync_preview,
+    default_app_data_dir,
     discover_manifest,
+    has_recovery_draft,
     load_package_session,
+    load_project_file,
+    prepare_disk_sync,
+    resolve_loaded_file_path,
+    save_project_file,
+    write_recovery_draft,
 )
 from app.ui.commands import (
     EditCellCommand,
@@ -46,6 +60,7 @@ from app.ui.commands import (
     ReviewCellCommand,
     ToggleOrphanDeletionCommand,
 )
+from app.ui.conflict_dialog import ConflictResolutionDialog
 from app.ui.delegates import StatusCellDelegate
 from app.ui.table_model import PackageFilterProxyModel, StatusFilterMode, TranslationTableModel
 
@@ -185,11 +200,13 @@ class ExpandedEditorDialog(QDialog):
 class MainWindow(QMainWindow):
     """Main desktop window displaying multilingual translation table and inspector."""
 
-    def __init__(self) -> None:
+    def __init__(self, app_data_dir: Path | None = None) -> None:
         super().__init__()
         self.setWindowTitle("i18n Reviewer")
         self.resize(1360, 780)
+        self.app_data_dir = app_data_dir or default_app_data_dir()
         self.session: PackageSession | None = None
+        self._project_unsaved: bool = False
         self.lang_checkboxes: dict[str, QCheckBox] = {}
         self._lang_actions: list[QAction] = []
 
@@ -197,6 +214,9 @@ class MainWindow(QMainWindow):
         self.table_model = TranslationTableModel(undo_stack=self.undo_stack)
         self.proxy_model = PackageFilterProxyModel()
         self.proxy_model.setSourceModel(self.table_model)
+
+        self.fs_watcher = QFileSystemWatcher(self)
+        self.fs_watcher.fileChanged.connect(lambda _: self.check_for_external_changes())
 
         self.search_debounce = QTimer(self)
         self.search_debounce.setSingleShot(True)
@@ -215,9 +235,17 @@ class MainWindow(QMainWindow):
         self.toolbar.setMovable(False)
         self.addToolBar(self.toolbar)
 
-        self.open_action = QAction("Abrir Pacote...", self)
+        self.open_action = QAction("Novo Projeto...", self)
         self.open_action.triggered.connect(self._on_open_package_clicked)
         self.toolbar.addAction(self.open_action)
+
+        self.open_proj_action = QAction("Abrir Projeto...", self)
+        self.open_proj_action.triggered.connect(self._on_open_project_clicked)
+        self.toolbar.addAction(self.open_proj_action)
+
+        self.save_proj_action = QAction("Salvar Projeto (Ctrl+S)", self)
+        self.save_proj_action.triggered.connect(lambda: self.save_project())
+        self.toolbar.addAction(self.save_proj_action)
 
         undo_action = self.undo_stack.createUndoAction(self, "Desfazer")
         undo_action.setShortcuts([QKeySequence(QKeySequence.StandardKey.Undo), QKeySequence("Ctrl+Z")])
@@ -280,6 +308,21 @@ class MainWindow(QMainWindow):
         self.diagnostic_banner.setVisible(False)
         root_layout.addWidget(self.diagnostic_banner)
 
+        self.external_change_banner = QFrame()
+        self.external_change_banner.setStyleSheet(
+            "QFrame { background: #dbeafe; border-bottom: 1px solid #3b82f6; padding: 4px 10px; }"
+        )
+        ext_layout = QHBoxLayout(self.external_change_banner)
+        ext_layout.setContentsMargins(6, 4, 6, 4)
+        self.external_change_label = QLabel("Arquivos do pacote foram alterados externamente no disco.")
+        self.external_change_label.setStyleSheet("color: #1e3a8a; font-weight: bold;")
+        self.btn_sync_now = QPushButton("Sincronizar agora")
+        self.btn_sync_now.clicked.connect(self.sync_with_disk)
+        ext_layout.addWidget(self.external_change_label, 1)
+        ext_layout.addWidget(self.btn_sync_now)
+        self.external_change_banner.setVisible(False)
+        root_layout.addWidget(self.external_change_banner)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         self.table = QTableView()
@@ -307,6 +350,12 @@ class MainWindow(QMainWindow):
         self.inspector_origin_label.setWordWrap(True)
         self.inspector_state_label = QLabel("")
         self.inspector_state_label.setWordWrap(True)
+        self.inspector_stale_label = QLabel("")
+        self.inspector_stale_label.setWordWrap(True)
+        self.inspector_stale_label.setStyleSheet(
+            "background: #ede9fe; color: #4c1d95; padding: 6px; border-radius: 4px;"
+        )
+        self.inspector_stale_label.setVisible(False)
         self.inspector_diag_label = QLabel("")
         self.inspector_diag_label.setWordWrap(True)
 
@@ -324,6 +373,7 @@ class MainWindow(QMainWindow):
         pv.addWidget(self.inspector_key_label)
         pv.addWidget(self.inspector_origin_label)
         pv.addWidget(self.inspector_state_label)
+        pv.addWidget(self.inspector_stale_label)
         pv.addWidget(self.inspector_diag_label)
         pv.addStretch()
         pv.addWidget(self.btn_review_next)
@@ -350,6 +400,9 @@ class MainWindow(QMainWindow):
             ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
             shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
 
+            if ctrl and key == Qt.Key.Key_S:
+                self.save_project()
+                return True
             if ctrl and key == Qt.Key.Key_F:
                 self.search_input.setFocus()
                 return True
@@ -389,6 +442,188 @@ class MainWindow(QMainWindow):
                 base_external_path=dlg.external_base_path,
             )
 
+    def _update_window_title(self) -> None:
+        if self.session is None:
+            self.setWindowTitle("i18n Reviewer")
+            return
+        star = " *" if self._project_unsaved else ""
+        self.setWindowTitle(f"i18n Reviewer — {self.session.manifest.package_id}{star}")
+
+    def _watch_session_files(self, session: PackageSession) -> None:
+        existing = self.fs_watcher.files()
+        if existing:
+            self.fs_watcher.removePaths(existing)
+        paths_to_watch: list[str] = []
+        for lf in session.files:
+            cand = resolve_loaded_file_path(session, lf)
+            if cand is not None and cand.exists():
+                paths_to_watch.append(str(cand))
+        if paths_to_watch:
+            self.fs_watcher.addPaths(paths_to_watch)
+
+    def _on_open_project_clicked(self) -> None:
+        default_dir = str(self.app_data_dir / "projects")
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            "Abrir projeto i18n Reviewer",
+            default_dir,
+            "i18n Reviewer Project (*.i18nproj)",
+        )
+        if path_str:
+            self.open_project_file(Path(path_str))
+
+    def open_project_file(self, project_path: Path) -> bool:
+        try:
+            loaded = load_project_file(project_path)
+        except PackageNotFoundError:
+            ans = QMessageBox.question(
+                self,
+                "Pacote não encontrado",
+                "A pasta do pacote Foundry não foi encontrada. Deseja relocalizá-la agora?",
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return False
+            reloc = QFileDialog.getExistingDirectory(self, "Relocalizar pasta do pacote")
+            if not reloc:
+                return False
+            try:
+                loaded = load_project_file(project_path, relocated_root=Path(reloc))
+            except PackageNotFoundError as exc:
+                QMessageBox.warning(self, "Pacote inválido", str(exc))
+                return False
+        except UnsupportedProjectVersionError as exc:
+            QMessageBox.critical(self, "Versão não suportada", str(exc))
+            return False
+
+        session = loaded.session
+        if has_recovery_draft(session.project_id, self.app_data_dir):
+            ans = QMessageBox.question(
+                self,
+                "Recuperação de rascunho",
+                "Foi encontrado um rascunho não salvo de uma sessão anterior. Deseja restaurá-lo?",
+            )
+            if ans == QMessageBox.StandardButton.Yes:
+                loaded = load_project_file(
+                    project_path,
+                    relocated_root=session.manifest.package_root,
+                    apply_recovery_dir=self.app_data_dir,
+                )
+                session = loaded.session
+                self._project_unsaved = True
+            else:
+                clear_recovery_draft(session.project_id, self.app_data_dir)
+                self._project_unsaved = False
+        else:
+            self._project_unsaved = bool(loaded.sync_report.conflicts)
+
+        if loaded.sync_report.blocked_files:
+            QMessageBox.warning(
+                self,
+                "Arquivos bloqueados na sincronização",
+                f"Arquivos ausentes ou inválidos impediram sincronização completa: {', '.join(loaded.sync_report.blocked_files)}",
+            )
+
+        self.load_session(session, preserve_unsaved=self._project_unsaved)
+        if loaded.sync_report.conflicts:
+            if self._prompt_conflict_resolutions(session, loaded.sync_report.conflicts):
+                self._project_unsaved = True
+                self.table_model.set_session(session)
+                self._refresh_statusbar(session)
+                self._update_window_title()
+        return True
+
+    def save_project(self, project_path: Path | None = None) -> bool:
+        if self.session is None:
+            return False
+        target = project_path or self.session.project_path
+        if target is None:
+            default_dir = self.app_data_dir / "projects"
+            default_dir.mkdir(parents=True, exist_ok=True)
+            suggested = str(default_dir / f"{self.session.manifest.package_id}.i18nproj")
+            path_str, _ = QFileDialog.getSaveFileName(
+                self,
+                "Salvar Projeto (.i18nproj)",
+                suggested,
+                "i18n Reviewer Project (*.i18nproj)",
+            )
+            if not path_str:
+                return False
+            target = Path(path_str)
+        save_project_file(self.session, target, app_data_dir=self.app_data_dir)
+        self._project_unsaved = False
+        self._update_window_title()
+        return True
+
+    def check_for_external_changes(self) -> None:
+        if self.session is None:
+            return
+        changed = check_external_disk_changes(self.session)
+        if changed:
+            self.external_change_label.setText(
+                f"Alteração externa detectada em: {', '.join(changed)}"
+            )
+            self.external_change_banner.setVisible(True)
+        else:
+            self.external_change_banner.setVisible(False)
+
+    def sync_with_disk(self) -> None:
+        if self.session is None:
+            return
+        preview = prepare_disk_sync(self.session)
+        if preview.report.blocked_files:
+            QMessageBox.warning(
+                self,
+                "Sincronização bloqueada",
+                f"Não foi possível sincronizar porque há arquivos ausentes ou inválidos: {', '.join(preview.report.blocked_files)}",
+            )
+            return
+        if preview.report.conflicts:
+            if not self._prompt_conflict_resolutions(preview.fresh_session, preview.report.conflicts):
+                return
+            self._project_unsaved = True
+        commit_sync_preview(self.session, preview)
+        self.load_session(self.session, preserve_unsaved=self._project_unsaved)
+        self.external_change_banner.setVisible(False)
+
+    def _prompt_conflict_resolutions(
+        self,
+        target_session: PackageSession,
+        conflicts: list[SyncConflict],
+    ) -> bool:
+        if not conflicts:
+            return True
+        dlg = ConflictResolutionDialog(conflicts, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        apply_conflict_resolutions(target_session, dlg.resolutions())
+        return True
+
+    def changeEvent(self, event: QEvent) -> None:
+        if event.type() == QEvent.Type.WindowActivate:
+            self.check_for_external_changes()
+        super().changeEvent(event)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.session is not None and self._project_unsaved:
+            ans = QMessageBox.question(
+                self,
+                "Alterações não salvas",
+                "Existem alterações não salvas no projeto (.i18nproj). Deseja salvar antes de fechar?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+            )
+            if ans == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+            if ans == QMessageBox.StandardButton.Save:
+                if not self.save_project():
+                    event.ignore()
+                    return
+        if self.session is not None:
+            clear_recovery_draft(self.session.project_id, self.app_data_dir)
+        super().closeEvent(event)
+
     def open_package_manifest(
         self,
         manifest_path: Path,
@@ -403,15 +638,20 @@ class MainWindow(QMainWindow):
             selected_entries=selected_entries,
             base_external_path=base_external_path,
         )
+        self._project_unsaved = False
         self.load_session(session)
         return session
 
-    def load_session(self, session: PackageSession) -> None:
+    def load_session(self, session: PackageSession, preserve_unsaved: bool = False) -> None:
         self.session = session
+        if not preserve_unsaved:
+            self._project_unsaved = False
         self.undo_stack.clear()
         self.cell_delegate.invalidate_cache()
         self.table_model.set_session(session)
-        self.setWindowTitle(f"i18n Reviewer — {session.manifest.package_id}")
+        self._update_window_title()
+        self._watch_session_files(session)
+        self.external_change_banner.setVisible(False)
 
         self.table.setColumnWidth(0, 230)
         self.table.setColumnWidth(1, 260)
@@ -648,6 +888,9 @@ class MainWindow(QMainWindow):
 
     def _on_cell_edited(self, _row: int, _col: int) -> None:
         if self.session is not None:
+            self._project_unsaved = True
+            self._update_window_title()
+            write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
             self._refresh_statusbar(self.session)
         self._on_current_changed(self.table.currentIndex(), QModelIndex())
 
@@ -668,6 +911,7 @@ class MainWindow(QMainWindow):
                 f"Origem: {row_data.base_source_file or '(ausente)'} (linha {row_data.base_line})"
             )
             self.inspector_state_label.setText("Estado: Referência (somente leitura)")
+            self.inspector_stale_label.setVisible(False)
             self.inspector_diag_label.setText("")
             return
 
@@ -685,6 +929,13 @@ class MainWindow(QMainWindow):
         self.inspector_state_label.setText(
             f"Estado: {cell.kind.name} · Revisão: {cell.review_status} · Dirty: {dirty_str}"
         )
+        if cell.review_status == "stale" or cell.previous_base is not None:
+            prev_txt = cell.previous_base if cell.previous_base is not None else "(ausente)"
+            curr_txt = row_data.base_text if row_data.base_text is not None else "(ausente)"
+            self.inspector_stale_label.setText(f"Base mudou (STALE):\nAntes: {prev_txt}\nAgora: {curr_txt}")
+            self.inspector_stale_label.setVisible(True)
+        else:
+            self.inspector_stale_label.setVisible(False)
 
         diags: list[str] = []
         files_to_check = [cell.source_file] if cell.source_file else []
