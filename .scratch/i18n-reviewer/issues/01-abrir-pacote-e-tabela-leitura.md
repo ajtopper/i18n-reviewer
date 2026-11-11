@@ -1,0 +1,18 @@
+# 01: Tracer bullet — abrir pacote Foundry e exibir tabela multilíngue de leitura
+
+**What to build:** O usuário abre um pacote do Foundry VTT apontando para o seu `module.json` ou `system.json` (com `en` pré-selecionado como base quando existir ou o 1º idioma do manifest, podendo trocar o idioma base, apontar um arquivo base externo fora do manifest ou desmarcar entradas condicionais `system`/`module`). O aplicativo lê os arquivos JSON declarados em `languages[]` usando um scanner JSON estrito em Python puro (mapeando spans de bytes/linhas e caminhos lógicos expandidos compatíveis com `expandObject`), mescla múltiplos arquivos do mesmo `lang` numa única coluna na ordem do manifest (rastreando o arquivo de origem de cada chave), diagnostica anomalias estruturais sem alterar nenhum arquivo e apresenta tudo na tabela multilíngue (`KEY_PATH`, idioma base e colunas de destino ocultáveis por checkboxes na toolbar) com o painel Inspector exibindo os detalhes da célula selecionada.
+
+**Blocked by:** None (can start immediately)
+
+**Status:** ready-for-agent
+
+- [ ] Ao abrir um `module.json` ou `system.json`, descobre todas as entradas de `languages[]` (resolvendo caminhos relativos à raiz do pacote e rejeitando `..`), pré-seleciona `en` como base (ou o 1º idioma) e permite trocar o idioma base, informar um arquivo base externo ou desmarcar entradas condicionais (`system`/`module`).
+- [ ] Entradas com `path` HTTP/HTTPS são listadas como não-editáveis com aviso; códigos de idioma fora do padrão BCP-47 (ex.: `pt-br`) ou colisões só por caixa geram aviso discreto sem modificar o manifest; arquivos fora de `languages[]` (ex.: Babele) são ignorados.
+- [ ] O scanner JSON estrito em Python puro lê os bytes brutos (detectando BOM, `CRLF`/`LF`, newline final, indentação e `ensure_ascii`) e mapeia spans `(start_byte, end_byte)` e linhas de cada par e objeto, expandindo caminhos pontuados como `expandObject` do Foundry.
+- [ ] Múltiplos arquivos do mesmo `lang` são mesclados na ordem do manifest numa única coluna (último vence), exibindo o arquivo de origem no Inspector, permitindo filtrar por arquivo na toolbar e sinalizando colisões entre arquivos do mesmo `lang`.
+- [ ] Diferencia visualmente e no modelo: chave ausente no destino (`MISSING`), string vazia existente `""` (`[vazia]`), texto igual à base (`= base`), chave exclusiva do destino (`ÓRFÃ`), folha não-string (`[não-string]`, somente leitura) e conflito estrutural folha×objeto entre base e destino (somente leitura com alerta).
+- [ ] Sob prefixos plurais da base (`.zero`, `.one`, `.two`, `.few`, `.many`, `.other`), categorias plurais válidas do idioma de destino segundo CLDR (ex.: `.many` em `pt-BR`, `es`, `fr`) não são marcadas como órfãs, e categorias exigidas pelo idioma que faltam no destino aparecem como `missing` sugeridas (usando `.other` da base como referência).
+- [ ] Chaves duplicadas no mesmo arquivo abrem normalmente apontando as linhas duplicadas e exibindo o valor da última ocorrência; JSON inválido ou folha seguida de ramo com o mesmo prefixo (`"A": "str"` antes de `"A.B": "x"`) abre o arquivo afetado em modo diagnóstico/somente-leitura apontando linha e erro, sem travar os demais arquivos.
+- [ ] A tabela exibe `KEY_PATH` (monoespaçada, somente leitura), idioma base (quebra de linha, somente leitura) e idiomas de destino com checkboxes na toolbar para ocultar/exibir colunas, além do painel Inspector lateral (retrátil) e rodapé de resumo numérico.
+- [ ] Suíte `pytest` + `pytest-qt` com fixtures autocontidas de leitura e diagnóstico cobrindo arquivos canônicos, não-canônicos, mistos, multi-arquivo, plurais CLDR, duplicados e malformados (mais teste opcional em cópia temporária do módulo `hearthbound` quando presente).
+

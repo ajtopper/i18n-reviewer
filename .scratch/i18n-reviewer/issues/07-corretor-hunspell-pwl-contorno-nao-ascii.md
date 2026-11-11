@@ -1,0 +1,16 @@
+# 07: Corretor ortográfico Hunspell (pyenchant), dicionário pessoal e contorno não-ASCII no Windows
+
+**What to build:** O aplicativo verifica a ortografia das traduções em `pt-BR`, `es`, `fr` e `de` usando `pyenchant` (provider Hunspell) e dicionários do LibreOffice, além de suportar qualquer dicionário `.aff/.dic` adicional colocado pelo usuário em `%APPDATA%\i18n-reviewer\enchant\hunspell\`. O serviço contorna automaticamente o bug do Hunspell MinGW em caminhos com caracteres não-ASCII no Windows e valida cada dicionário com uma palavra-sentinela, filtra ruído técnico e termos do glossário, executa `check()` em background (`QThreadPool`) e calcula sugestões (`suggest()`) apenas sob demanda na 4ª seção do menu de contexto, com opção de *"Adicionar ao dicionário"* pessoal global (PWL).
+
+**Blocked by:** 05: Proteção de placeholders, enrichers e HTML (destaque, validação em cascata e exceções), 06: Glossário em 2 níveis (Global + Projeto), linter terminológico, Ctrl+Space e CSV/JSON
+
+**Status:** ready-for-agent
+
+- [ ] `SpellService` encapsula `pyenchant` (provider `hunspell`) atrás de uma interface própria (`check`, `suggest`, `add_personal`), mapeando códigos do Foundry para tags Enchant (`pt-BR` → `pt_BR`, `es` → `es_ES`, `fr` → `fr_FR`, `de` → `de_DE`, com fallback por prefixo) e descobrindo dicionários extras em `%APPDATA%\i18n-reviewer\enchant\hunspell\`.
+- [ ] Quando um idioma de destino não possui dicionário disponível (ex.: `eo` sem `.aff/.dic` instalado), o corretor fica desligado naquela coluna e a UI mostra aviso discreto no cabeçalho/Inspector indicando a pasta `enchant\hunspell\` do usuário.
+- [ ] Contorno Windows para caminhos com acentos/não-ASCII: se o caminho dos dicionários empacotados ou `ENCHANT_CONFIG_DIR` tiver caracteres não-ASCII, converte via `GetShortPathNameW` (caminho curto 8.3) ou usa pasta ASCII configurável em `settings.json`, executando sempre autoverificação com **palavra-sentinela** ao abrir cada dicionário para nunca rejeitar palavras silenciosamente.
+- [ ] A tokenização mascara antes os spans técnicos do Ticket 05 (`{x}`, `{{hbs}}`, HTML/XML, URLs e partes técnicas de enrichers), ignora termos do glossário ativo do Ticket 06 (originais e traduções aceitas), palavras em MAIÚSCULAS, números/fórmulas de dados (`1d20`), tokens com ≤ 2 letras (`h`, `m`, `ft`) e palavras idênticas à string base, preservando hífens (`guarda-costas`, `peut-être`) e apóstrofos (`l'arme`) na consulta ao Hunspell.
+- [ ] Roda `check()` em tempo real ao editar uma célula e em lote assíncrono (`QThreadPool`) para o projeto (emitindo aviso visual âmbar não-bloqueante), calculando `suggest()` **somente sob demanda** quando o usuário abre o menu de contexto ou inspeciona a célula.
+- [ ] A 4ª seção do menu de contexto lista sugestões de substituição por palavra desconhecida (integrada ao `QUndoStack`) e a ação *"Adicionar '<palavra>' ao dicionário"*, que persiste no PWL global do idioma em `ENCHANT_CONFIG_DIR` e revalida as células afetadas.
+- [ ] Testes `pytest` + `pytest-qt` cobrindo verificação e sugestões em `pt_BR`, `es_ES`, `fr_FR`, `de_DE`, idioma sem dicionário (`eo`), filtro de tokens ignorados, persistência em PWL global e abertura de dicionário em diretório com caracteres não-ASCII (`pasta ção`) validada por palavra-sentinela.
+
