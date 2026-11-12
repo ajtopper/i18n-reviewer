@@ -4,12 +4,12 @@
 
 **Blocked by:** 04: Writer cirúrgico por spans, backups agrupados e pipeline Enviar para Produção / Restaurar, 07: Corretor ortográfico Hunspell (pyenchant), dicionário pessoal e contorno não-ASCII no Windows, 08: Tradução completa da interface e mensagens para Inglês Internacional
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `requirements.txt` e `requirements-dev.txt` fixam as versões validadas para CPython 3.14.x 64-bit (`PySide6-Essentials==6.12.0`, `shiboken6==6.12.0`, `pyenchant==3.3.0`, `pyinstaller==6.22.3`, `pyinstaller-hooks-contrib==2026.10`, `pytest`, `pytest-qt`).
-- [ ] `spec/build.spec` compila em modo `--onedir --windowed` (`dist/i18n-reviewer/i18n-reviewer.exe`), excluindo módulos Qt não usados (`QtWebEngine*`, `QtQml`, `QtQuick`, `Qt3D*`, `QtMultimedia*`, `QtPdf*`).
-- [ ] `spec/build.spec` filtra os binários/dados do `enchant` para manter apenas `libenchant-2`, `enchant_hunspell` e suas 8 DLLs dependentes (removendo `nuspell`/ICU e DLLs MSYS2/GPLv3 não carregadas como `readline` e `gettext-tools`), configura `module_collection_mode={'enchant': 'py'}` (conformidade LGPL-2.1) e empacota os dicionários `en_US`, `pt_BR`, `es_ES`, `fr_FR` e `de_DE`.
-- [ ] O pacote gerado inclui a pasta `licenses/` com os avisos de copyright, textos de licença (LGPL-2.1, LGPL-3.0, MPL-2.0, GPL) e links/instruções para obtenção das formas-fonte dos dicionários e bibliotecas, além de script Inno Setup opcional no repositório e geração de `.zip` portátil.
-- [ ] O ponto de entrada suporta a flag `--self-test`, que inicializa a aplicação Qt em modo offscreen, instancia os componentes principais, carrega `pt_BR`, `es_ES`, `fr_FR` e `de_DE` no `SpellService` passando na verificação por palavra-sentinela e encerra com código `0` (ou código `!= 0` com diagnóstico em caso de falha).
-- [ ] O comando `pyinstaller spec/build.spec` conclui sem erros e a execução subsequente de `dist/i18n-reviewer/i18n-reviewer.exe --self-test` passa com `exit 0` ( inclusive quando executado a partir de um caminho contendo caracteres acentuados).
+- [x] `requirements.txt` e `requirements-dev.txt` fixam as versões validadas para CPython 3.14.x 64-bit (`PySide6-Essentials==6.12.0`, `shiboken6==6.12.0`, `pyenchant==3.3.0`, `pyinstaller==6.22.3`, `pyinstaller-hooks-contrib==2026.10`, `pytest`, `pytest-qt`).
+- [x] `spec/build.spec` compila em modo `--onedir --windowed` (`dist/i18n-reviewer/i18n-reviewer.exe`), excluindo módulos Qt não usados (`QtWebEngine*`, `QtQml`, `QtQuick`, `Qt3D*`, `QtMultimedia*`, `QtPdf*`).
+- [x] `spec/build.spec` filtra os binários/dados do `enchant` para manter apenas `libenchant-2`, `enchant_hunspell` e suas 8 DLLs dependentes (removendo `nuspell`/ICU e DLLs MSYS2/GPLv3 não carregadas como `readline` e `gettext-tools`), configura `module_collection_mode={'enchant': 'py'}` (conformidade LGPL-2.1) e empacota os dicionários `en_US`, `pt_BR`, `es_ES`, `fr_FR` e `de_DE`.
+- [x] O pacote gerado inclui a pasta `licenses/` com os avisos de copyright, textos de licença (LGPL-2.1, LGPL-3.0, MPL-2.0, GPL) e links/instruções para obtenção das formas-fonte dos dicionários e bibliotecas, além de script Inno Setup opcional no repositório e geração de `.zip` portátil.
+- [x] O ponto de entrada suporta a flag `--self-test`, que inicializa a aplicação Qt em modo offscreen, instancia os componentes principais, carrega `pt_BR`, `es_ES`, `fr_FR` e `de_DE` no `SpellService` passando na verificação por palavra-sentinela e encerra com código `0` (ou código `!= 0` com diagnóstico em caso de falha).
+- [x] O comando `pyinstaller spec/build.spec` conclui sem erros e a execução subsequente de `dist/i18n-reviewer/i18n-reviewer.exe --self-test` passa com `exit 0` ( inclusive quando executado a partir de um caminho contendo caracteres acentuados).
 
