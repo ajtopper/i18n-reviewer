@@ -331,4 +331,33 @@ def test_prepare_publish_plan_blocks_critical_validation_and_surfaces_warnings(t
     assert by_rel_reblocked["lang/pt-BR.json"].is_blocked is True
 
 
+def test_glossary_inconsistency_warns_on_publish_without_blocking(tmp_path: Path) -> None:
+    from app.core.glossary import GlossaryEntry
+
+    app_data = tmp_path / "appdata"
+    pkg = tmp_path / "gloss-pub"
+    _write_json(
+        pkg / "module.json",
+        {
+            "id": "gloss-pub",
+            "languages": [
+                {"lang": "en", "path": "lang/en.json"},
+                {"lang": "pt-BR", "path": "lang/pt-BR.json"},
+            ],
+        },
+    )
+    _write_json(pkg / "lang/en.json", {"CAST": "Cast a Spell"})
+    _write_json(pkg / "lang/pt-BR.json", {"CAST": "Lance uma Magia"})
+
+    session = load_package_session(discover_manifest(pkg / "module.json"))
+    session.project_glossary = [GlossaryEntry(term="Spell", translations={"pt-BR": ["Feitiço"]})]
+    rows = {r.key_path: r for r in session.rows}
+    rows["CAST"].cells["pt-BR"].apply_edit("Conjure um encanto", base_text="Cast a Spell")
+
+    plan = prepare_publish_plan(session, app_data_dir=app_data)
+    fp = plan.file_plans[0]
+    assert fp.is_blocked is False
+    assert any("Spell" in w for w in fp.validation_warnings)
+
+
 

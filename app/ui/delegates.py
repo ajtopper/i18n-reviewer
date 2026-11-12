@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QPlainTextEdit, QStyle, QStyledItemDelegate, QStyl
 
 from app.core.project_manager import CellData, CellKind
 from app.core.validator import CustomEnricherRule
+from app.ui.glossary_dialog import GlossaryCellContext, attach_ctrl_space_glossary_popup
 from app.ui.highlighter import TokenHighlighter
 from app.ui.table_model import BASE_ISSUES_ROLE
 
@@ -52,11 +53,14 @@ class StatusCellDelegate(QStyledItemDelegate):
         parent: QWidget | None = None,
         custom_enrichers_getter: Callable[[], list[CustomEnricherRule]] | None = None,
         live_text_changed: Callable[[CellData, str], None] | None = None,
+        glossary_context_getter: Callable[[QModelIndex | QPersistentModelIndex], GlossaryCellContext]
+        | None = None,
     ) -> None:
         super().__init__(parent)
         self._height_cache: dict[tuple[int, int, int, str], int] = {}
         self._custom_enrichers_getter = custom_enrichers_getter
         self._live_text_changed = live_text_changed
+        self._glossary_context_getter = glossary_context_getter
         self._cursor_positions: dict[int, int] = {}
         self._populating_editor = False
 
@@ -169,6 +173,17 @@ class StatusCellDelegate(QStyledItemDelegate):
                         cb(c, ed.toPlainText())
 
                 editor.textChanged.connect(_on_live_text)
+        if self._glossary_context_getter is not None:
+            ctx = self._glossary_context_getter(index)
+
+            def _get_ctx() -> GlossaryCellContext:
+                return ctx
+
+            attach_ctrl_space_glossary_popup(
+                editor,
+                context_getter=_get_ctx,
+                custom_enrichers_getter=self._custom_enrichers_getter,
+            )
         return editor
 
     def setEditorData(

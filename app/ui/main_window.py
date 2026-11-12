@@ -3,7 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, cast
 
-from PySide6.QtCore import QEvent, QFileSystemWatcher, QModelIndex, QObject, QThreadPool, QTimer, Qt
+from PySide6.QtCore import (
+    QEvent,
+    QFileSystemWatcher,
+    QModelIndex,
+    QObject,
+    QPersistentModelIndex,
+    QThreadPool,
+    QTimer,
+    Qt,
+)
 from PySide6.QtGui import QAction, QCloseEvent, QKeyEvent, QKeySequence, QUndoStack
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -65,6 +74,14 @@ from app.core.project_manager import (
     save_project_file,
     write_recovery_draft,
 )
+from app.core.glossary import (
+    GlossaryEntry,
+    detect_base_glossary_matches,
+    lint_translation_glossary,
+    load_global_glossary,
+    merge_glossaries,
+    save_global_glossary,
+)
 from app.core.validator import (
     CustomEnricherRule,
     ValidationIssue,
@@ -83,9 +100,20 @@ from app.ui.backup_dialog import BackupDialog, PublishDialog
 from app.ui.conflict_dialog import ConflictResolutionDialog
 from app.ui.delegates import StatusCellDelegate
 from app.ui.enrichers_dialog import CustomEnrichersDialog
+from app.ui.glossary_dialog import (
+    GlossaryCellContext,
+    GlossaryDialog,
+    attach_ctrl_space_glossary_popup,
+    open_glossary_popup_at,
+)
 from app.ui.highlighter import TokenHighlighter
 from app.ui.table_model import PackageFilterProxyModel, StatusFilterMode, TranslationTableModel
-from app.ui.validation_worker import RowValidationSnapshot, ValidationRunnable, ValidationSignals
+from app.ui.validation_worker import (
+    RowValidationResult,
+    RowValidationSnapshot,
+    ValidationRunnable,
+    ValidationSignals,
+)
 
 
 class OpenPackageDialog(QDialog):
@@ -192,6 +220,7 @@ class ExpandedEditorDialog(QDialog):
         lang: str,
         parent: QWidget | None = None,
         custom_enrichers: list[CustomEnricherRule] | None = None,
+        glossary_entries: list[GlossaryEntry] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Editor Expandido — {key_path} ({lang})")
@@ -200,6 +229,7 @@ class ExpandedEditorDialog(QDialog):
         self._key_path = key_path
         self._lang = lang
         self._custom_enrichers = list(custom_enrichers or [])
+        self._glossary_entries = list(glossary_entries or [])
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"Chave: {key_path} · Idioma: {lang}"))
@@ -223,6 +253,15 @@ class ExpandedEditorDialog(QDialog):
         self.target_edit = QPlainTextEdit()
         self.target_edit.setPlainText(target_text)
         TokenHighlighter(self.target_edit.document(), custom_enrichers=self._custom_enrichers)
+        attach_ctrl_space_glossary_popup(
+            self.target_edit,
+            context_getter=lambda: GlossaryCellContext(
+                base_text=self._base_text,
+                lang=self._lang,
+                entries=self._glossary_entries,
+            ),
+            custom_enrichers_getter=lambda: self._custom_enrichers,
+        )
         self.target_edit.textChanged.connect(self._refresh_missing_strip)
         right_box.addWidget(self.target_edit)
 
@@ -271,6 +310,13 @@ class ExpandedEditorDialog(QDialog):
             self._base_text,
             curr_text,
             custom_enrichers=self._custom_enrichers,
+        ) + lint_translation_glossary(
+            self._key_path,
+            self._lang,
+            self._base_text,
+            curr_text,
+            self._glossary_entries,
+            custom_enrichers=self._custom_enrichers,
         )
         if issues:
             self.live_alert_label.setText(
@@ -299,6 +345,8 @@ class MainWindow(QMainWindow):
         self._lang_actions: list[QAction] = []
         self._validation_gen: int = 0
         self._active_validation_workers: int = 0
+        self._global_glossary_cache: list[GlossaryEntry] = load_global_glossary(self.app_data_dir)
+        self._table_glossary_popup: object | None = None
         self._validation_signals = ValidationSignals(self)
         self._validation_signals.batch_ready.connect(self._on_validation_batch_ready)
         self._validation_signals.finished.connect(self._on_validation_finished)
@@ -356,6 +404,7 @@ class MainWindow(QMainWindow):
         self.status_filter_combo.addItem("Apenas Pendentes", "pending")
         self.status_filter_combo.addItem("Apenas Editadas", "edited")
         self.status_filter_combo.addItem("Todos os Alertas", "alerts")
+        self.status_filter_combo.addItem("Inconsistências de Glossário", "glossary")
         self.status_filter_combo.currentIndexChanged.connect(self._on_status_filter_changed)
         self.toolbar.addWidget(self.status_filter_combo)
 
@@ -390,6 +439,10 @@ class MainWindow(QMainWindow):
         self.btn_custom_enrichers = QPushButton("Regras Enrichers...")
         self.btn_custom_enrichers.clicked.connect(self.open_custom_enrichers_dialog)
         self.toolbar.addWidget(self.btn_custom_enrichers)
+
+        self.btn_glossary = QPushButton("Glossário...")
+        self.btn_glossary.clicked.connect(self.open_glossary_dialog)
+        self.toolbar.addWidget(self.btn_glossary)
 
         self.btn_restore_backup = QPushButton("Restaurar Backup")
         self.btn_restore_backup.clicked.connect(self.open_backup_dialog)
@@ -440,6 +493,7 @@ class MainWindow(QMainWindow):
             self.table,
             custom_enrichers_getter=lambda: list(self.session.custom_enrichers) if self.session else [],
             live_text_changed=self._on_inline_text_changed,
+            glossary_context_getter=self._glossary_context_for_index,
         )
         self.table.setItemDelegate(self.cell_delegate)
         self.table.setWordWrap(True)
@@ -517,6 +571,9 @@ class MainWindow(QMainWindow):
             ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
             shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
 
+            if ctrl and key == Qt.Key.Key_Space and watched is self.table:
+                self._open_table_glossary_popup()
+                return True
             if ctrl and key == Qt.Key.Key_S:
                 self.save_project()
                 return True
@@ -713,7 +770,7 @@ class MainWindow(QMainWindow):
     def publish_to_production(self) -> bool:
         if self.session is None:
             return False
-        plan = prepare_publish_plan(self.session)
+        plan = prepare_publish_plan(self.session, app_data_dir=self.app_data_dir)
         if plan.external_changes:
             QMessageBox.warning(
                 self,
@@ -863,6 +920,7 @@ class MainWindow(QMainWindow):
 
     def load_session(self, session: PackageSession, preserve_unsaved: bool = False) -> None:
         self.session = session
+        self._global_glossary_cache = load_global_glossary(self.app_data_dir)
         if not preserve_unsaved:
             self._project_unsaved = False
         self.undo_stack.clear()
@@ -1065,6 +1123,7 @@ class MainWindow(QMainWindow):
             lang,
             self,
             custom_enrichers=self.session.custom_enrichers,
+            glossary_entries=self.merged_glossary(),
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             new_val = dlg.edited_text()
@@ -1136,7 +1195,152 @@ class MainWindow(QMainWindow):
 
                 act_ig.triggered.connect(_make_ig(rule_id))
 
+        # 3ª seção: glossário (aplicar tradução preferida / adicionar termo)
+        if self.session is not None and cell.can_edit():
+            lang = self.session.target_langs[source_index.column() - 2]
+            merged = self.merged_glossary()
+            matches = detect_base_glossary_matches(
+                row_data.base_text,
+                merged,
+                custom_enrichers=self.session.custom_enrichers,
+            )
+            menu.addSeparator()
+            for entry in matches[:6]:
+                pref = entry.preferred_translation(lang)
+                if pref is None:
+                    continue
+                act_pref = menu.addAction(f"Aplicar glossário: {entry.term} → {pref}")
+
+                def _make_pref(val: str) -> Callable[[bool], None]:
+                    def _handler(_checked: bool = False) -> None:
+                        self.insert_missing_token_for_current(val)
+
+                    return _handler
+
+                act_pref.triggered.connect(_make_pref(pref))
+
+            focus_w = self.table.focusWidget()
+            selected_txt = (
+                focus_w.textCursor().selectedText().replace("\u2029", " ").strip()
+                if isinstance(focus_w, QPlainTextEdit)
+                else ""
+            )
+            prefill_term = selected_txt or (row_data.base_text or "").strip()[:60]
+            prefill_trans = "" if selected_txt else (cell.local_value or "").strip()[:80]
+
+            def _open_add_term(_checked: bool = False) -> None:
+                self.open_glossary_dialog(
+                    prefill_term=prefill_term,
+                    prefill_translation=prefill_trans,
+                    prefill_lang=lang,
+                )
+
+            act_add_gloss = menu.addAction("Adicionar termo ao glossário...")
+            act_add_gloss.triggered.connect(_open_add_term)
+
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _open_table_glossary_popup(self) -> None:
+        """Open Ctrl+Space glossary popup directly over a selected table cell when no inline editor is active."""
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2 or self.session is None:
+            return
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        if row_data is None or cell is None or not cell.can_edit():
+            return
+        lang = self.session.target_langs[col - 2]
+        cur_idx = self.table.currentIndex()
+        rect = self.table.visualRect(cur_idx)
+        global_pos = self.table.viewport().mapToGlobal(rect.bottomLeft())
+
+        def _apply_from_table(chosen: str) -> None:
+            if cell.is_missing or not (cell.local_value or "").strip():
+                if cell.will_apply_edit(chosen):
+                    self.undo_stack.push(
+                        EditCellCommand(
+                            cell=cell,
+                            base_text=row_data.base_text,
+                            new_value=chosen,
+                            row=row,
+                            col=col,
+                            notify=self.table_model.notify_cell_changed,
+                        )
+                    )
+            else:
+                self.insert_missing_token_for_current(chosen)
+
+        self._table_glossary_popup = open_glossary_popup_at(
+            self.table,
+            global_pos,
+            base_text=row_data.base_text or "",
+            lang=lang,
+            entries=self.merged_glossary(),
+            custom_enrichers=self.session.custom_enrichers,
+            on_selected=_apply_from_table,
+        )
+
+    def merged_glossary(self) -> list[GlossaryEntry]:
+        """Return merged Global (cached) + Project glossary entries for the active session."""
+        project_entries = self.session.project_glossary if self.session is not None else []
+        return merge_glossaries(self._global_glossary_cache, project_entries)
+
+    def revalidate_session(self, *, refresh_global: bool = False) -> None:
+        """Re-run asynchronous validation and glossary linting for the active session."""
+        if refresh_global:
+            self._global_glossary_cache = load_global_glossary(self.app_data_dir)
+        if self.session is not None:
+            self._start_background_validation(self.session)
+
+    def _glossary_context_for_index(
+        self,
+        index: QModelIndex | QPersistentModelIndex,
+    ) -> GlossaryCellContext:
+        if self.session is None or not index.isValid():
+            return GlossaryCellContext(base_text="", lang="", entries=[])
+        src = self.proxy_model.mapToSource(index)
+        if not src.isValid() or src.column() < 2:
+            return GlossaryCellContext(base_text="", lang="", entries=[])
+        row_data = self.table_model.get_row(src.row())
+        lang = self.session.target_langs[src.column() - 2]
+        return GlossaryCellContext(
+            base_text=row_data.base_text or "" if row_data else "",
+            lang=lang,
+            entries=self.merged_glossary(),
+        )
+
+    def open_glossary_dialog(
+        self,
+        *,
+        prefill_term: str = "",
+        prefill_translation: str = "",
+        prefill_lang: str = "",
+    ) -> bool:
+        """Open two-level glossary management dialog and revalidate session if saved."""
+        self._global_glossary_cache = load_global_glossary(self.app_data_dir)
+        project_entries = list(self.session.project_glossary) if self.session is not None else []
+        target_langs = list(self.session.target_langs) if self.session is not None else ["pt-BR"]
+        dlg = GlossaryDialog(
+            global_entries=self._global_glossary_cache,
+            project_entries=project_entries,
+            target_langs=target_langs,
+            prefill_term=prefill_term,
+            prefill_translation=prefill_translation,
+            prefill_lang=prefill_lang,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        save_global_glossary(dlg.global_entries(), app_data_dir=self.app_data_dir)
+        self._global_glossary_cache = dlg.global_entries()
+        if self.session is not None:
+            self.session.project_glossary = dlg.project_entries()
+            self._project_unsaved = True
+            self._update_window_title()
+            write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
+            self.revalidate_session()
+        return True
 
     def _cell_validation_action_specs(
         self,
@@ -1153,7 +1357,7 @@ class MainWindow(QMainWindow):
             if cell.can_edit()
             else []
         )
-        alert_items = [(issue.rule_id, issue.is_ignored) for issue in cell.validation_issues]
+        alert_items = [(issue.rule_id, issue.is_ignored) for issue in cell.all_validation_issues]
         return missing_toks, alert_items
 
     @property
@@ -1213,6 +1417,7 @@ class MainWindow(QMainWindow):
             visible_count=len(visible_idxs),
             custom_enrichers=list(session.custom_enrichers),
             ignored_warnings=list(session.ignored_warnings),
+            glossary_entries=self.merged_glossary(),
             signals=self._validation_signals,
         )
         QThreadPool.globalInstance().start(worker, 5)
@@ -1220,21 +1425,25 @@ class MainWindow(QMainWindow):
     def _on_validation_batch_ready(
         self,
         gen: int,
-        batch: list[tuple[int, list[ValidationIssue], dict[str, list[ValidationIssue]]]],
+        batch: list[RowValidationResult],
     ) -> None:
         if gen != self._validation_gen or self.session is None:
             return
         rows = self.session.rows
-        for row_idx, base_issues, cell_map in batch:
-            if 0 <= row_idx < len(rows):
-                row_data = rows[row_idx]
-                row_data.base_issues = base_issues
-                for lang, issues in cell_map.items():
+        for item in batch:
+            if 0 <= item.row_index < len(rows):
+                row_data = rows[item.row_index]
+                row_data.base_issues = item.base_issues
+                for lang, issues in item.cell_validation_issues.items():
                     cell = row_data.cells.get(lang)
                     if cell is not None:
                         cell.validation_issues = issues
+                for lang, g_issues in item.cell_glossary_issues.items():
+                    cell = row_data.cells.get(lang)
+                    if cell is not None:
+                        cell.glossary_issues = g_issues
         self.table.viewport().update()
-        if self.proxy_model.status_filter == "alerts":
+        if self.proxy_model.status_filter in ("alerts", "glossary"):
             self.proxy_model.invalidateFilter()
 
     def _on_validation_finished(self, gen: int) -> None:
@@ -1249,6 +1458,7 @@ class MainWindow(QMainWindow):
         if self.session is None or not (0 <= source_row < len(self.session.rows)):
             return
         row_data = self.session.rows[source_row]
+        glossary = self.merged_glossary()
         row_data.base_issues = inspect_base_defects(
             row_data.base_text,
             custom_enrichers=self.session.custom_enrichers,
@@ -1263,7 +1473,16 @@ class MainWindow(QMainWindow):
                 ignored_warnings=self.session.ignored_warnings,
                 ignore_empty=not cell.is_dirty,
             )
-        if self.proxy_model.status_filter == "alerts":
+            cell.glossary_issues = lint_translation_glossary(
+                row_data.key_path,
+                lang,
+                row_data.base_text,
+                cell.local_value,
+                glossary,
+                custom_enrichers=self.session.custom_enrichers,
+                ignored_warnings=self.session.ignored_warnings,
+            )
+        if self.proxy_model.status_filter in ("alerts", "glossary"):
             self.proxy_model.invalidateFilter()
 
     def _on_inline_text_changed(self, target_cell: CellData, draft_text: str) -> None:
@@ -1284,6 +1503,15 @@ class MainWindow(QMainWindow):
             custom_enrichers=self.session.custom_enrichers,
             ignored_warnings=self.session.ignored_warnings,
             ignore_empty=(draft_text == cell.prod_value and not cell.is_dirty),
+        )
+        cell.glossary_issues = lint_translation_glossary(
+            row_data.key_path,
+            lang,
+            row_data.base_text,
+            draft_text,
+            self.merged_glossary(),
+            custom_enrichers=self.session.custom_enrichers,
+            ignored_warnings=self.session.ignored_warnings,
         )
         self.table.viewport().update()
         self._refresh_inspector_diagnostics(row_data, cell, lang, live_text=draft_text)
@@ -1474,7 +1702,7 @@ class MainWindow(QMainWindow):
                 diags.append(f"[{w.kind}] {w.message}")
         for base_iss in row_data.base_issues:
             diags.append(f"[base:{base_iss.severity}] {base_iss.message}")
-        for v_iss in cell.validation_issues:
+        for v_iss in cell.all_validation_issues:
             tag = f"{v_iss.severity} (ignorado)" if v_iss.is_ignored else v_iss.severity
             reason_sfx = f" — {v_iss.ignored_reason}" if v_iss.ignored_reason else ""
             diags.append(f"[{tag}:{v_iss.rule_id}] {v_iss.message}{reason_sfx}")
@@ -1491,7 +1719,7 @@ class MainWindow(QMainWindow):
                 if cell.can_edit()
                 else []
             )
-            alert_items = [(v.rule_id, v.is_ignored) for v in cell.validation_issues]
+            alert_items = [(v.rule_id, v.is_ignored) for v in cell.all_validation_issues]
         else:
             missing_toks, alert_items = self._cell_validation_action_specs(row_data, cell)
 

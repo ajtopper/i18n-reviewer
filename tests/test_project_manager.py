@@ -465,6 +465,7 @@ def test_three_way_merge_stale_transition_and_invalid_disk_blocking(tmp_path: Pa
 
 
 def test_ignored_warnings_and_custom_enrichers_persist_in_i18nproj(tmp_path: Path) -> None:
+    from app.core.glossary import GlossaryEntry
     from app.core.validator import CustomEnricherRule, IgnoredWarning, compute_value_hash
 
     app_data = tmp_path / "appdata"
@@ -493,6 +494,13 @@ def test_ignored_warnings_and_custom_enrichers_persist_in_i18nproj(tmp_path: Pat
             reason="Texto simplificado",
         )
     ]
+    session.project_glossary = [
+        GlossaryEntry(
+            term="Macro",
+            translations={"pt-BR": ["Macro do Sistema"]},
+            notes="Projeto",
+        )
+    ]
 
     proj_file = tmp_path / "rules.i18nproj"
     save_project_file(session, proj_file, app_data_dir=app_data)
@@ -500,6 +508,7 @@ def test_ignored_warnings_and_custom_enrichers_persist_in_i18nproj(tmp_path: Pat
     reopened = load_project_file(proj_file)
     assert reopened.session.custom_enrichers == session.custom_enrichers
     assert reopened.session.ignored_warnings == session.ignored_warnings
+    assert reopened.session.project_glossary == session.project_glossary
 
 
 

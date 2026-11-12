@@ -9,6 +9,7 @@ import re
 from typing import Any, Literal
 import uuid
 
+from app.core.glossary import GlossaryEntry
 from app.core.json_handler import (
     DiagnosticIssue,
     LangEntry,
@@ -122,14 +123,23 @@ class CellData:
     review_status: ReviewStatus = "unreviewed"
     previous_base: str | None = None
     validation_issues: list[ValidationIssue] = field(default_factory=list, compare=False, repr=False)
+    glossary_issues: list[ValidationIssue] = field(default_factory=list, compare=False, repr=False)
 
     @property
     def active_validation_issues(self) -> list[ValidationIssue]:
         return [i for i in self.validation_issues if not i.is_ignored]
 
     @property
+    def active_glossary_issues(self) -> list[ValidationIssue]:
+        return [i for i in self.glossary_issues if not i.is_ignored]
+
+    @property
+    def all_validation_issues(self) -> list[ValidationIssue]:
+        return [*self.validation_issues, *self.glossary_issues]
+
+    @property
     def validation_severity(self) -> IssueSeverity | None:
-        active = self.active_validation_issues
+        active = [*self.active_validation_issues, *self.active_glossary_issues]
         if any(i.severity == "critical" for i in active):
             return "critical"
         if any(i.severity == "warning" for i in active):
@@ -341,6 +351,7 @@ class PackageSession:
     pending_conflict_keys: set[tuple[str, str]] = field(default_factory=set)
     ignored_warnings: list[IgnoredWarning] = field(default_factory=list)
     custom_enrichers: list[CustomEnricherRule] = field(default_factory=list)
+    project_glossary: list[GlossaryEntry] = field(default_factory=list)
 
     def has_ignored_warning(
         self,

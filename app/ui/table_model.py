@@ -15,7 +15,7 @@ from PySide6.QtGui import QColor, QFont, QUndoStack
 from app.core.project_manager import CellData, CellKind, PackageSession, TableRowData
 from app.ui.commands import EditCellCommand
 
-StatusFilterMode = Literal["all", "pending", "edited", "alerts"]
+StatusFilterMode = Literal["all", "pending", "edited", "alerts", "glossary"]
 BASE_ISSUES_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 
@@ -262,6 +262,9 @@ class PackageFilterProxyModel(QSortFilterProxyModel):
                 c.validation_severity in ("critical", "warning")
                 for c in row_data.cells.values()
             ):
+                return False
+        elif self.status_filter == "glossary":
+            if not any(bool(c.active_glossary_issues) for c in row_data.cells.values()):
                 return False
 
         if self.search_query and not row_data.matches_search(self.search_query):

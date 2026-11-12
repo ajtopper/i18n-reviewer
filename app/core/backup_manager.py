@@ -11,6 +11,11 @@ import shutil
 import time
 from typing import Any, Callable, Literal
 
+from app.core.glossary import (
+    lint_translation_glossary,
+    load_global_glossary,
+    merge_glossaries,
+)
 from app.core.json_handler import FileStyle, ParsedLangDocument, apply_surgical_edits, parse_lang_bytes
 from app.core.project_manager import (
     CellKind,
@@ -333,11 +338,18 @@ def _base_fallback_style(session: PackageSession) -> FileStyle | None:
     return None
 
 
-def prepare_publish_plan(session: PackageSession) -> PublishPlan:
+def prepare_publish_plan(
+    session: PackageSession,
+    app_data_dir: Path | None = None,
+) -> PublishPlan:
     """Validate dirty target files, detect external changes, and build candidate JSON payloads in memory."""
     external = check_external_disk_changes(session)
     base_order = [r.key_path for r in session.rows if not r.is_orphan_row]
     fallback_style = _base_fallback_style(session)
+    glossary_entries = merge_glossaries(
+        load_global_glossary(app_data_dir),
+        session.project_glossary,
+    )
 
     buckets: dict[str, _FilePublishBucket] = {}
     row_by_key = {r.key_path: r for r in session.rows}
@@ -379,6 +391,17 @@ def prepare_publish_plan(session: PackageSession) -> PublishPlan:
                         bucket.validation_criticals.append(f"{row.key_path}: {issue.message}")
                     elif issue.severity == "warning":
                         bucket.validation_warnings.append(f"{row.key_path}: {issue.message}")
+                for g_issue in lint_translation_glossary(
+                    row.key_path,
+                    lang,
+                    row.base_text,
+                    cell.local_value,
+                    glossary_entries,
+                    custom_enrichers=session.custom_enrichers,
+                    ignored_warnings=session.ignored_warnings,
+                ):
+                    if not g_issue.is_ignored:
+                        bucket.validation_warnings.append(f"{row.key_path}: {g_issue.message}")
 
     for conflict_key, conflict_lang in sorted(session.pending_conflict_keys):
         crow = row_by_key.get(conflict_key)

@@ -596,4 +596,156 @@ def test_ticket05_validation_filter_highlighter_token_insert_ignore_and_custom_e
     win.save_project(proj_path)
 
 
+def test_ticket06_glossary_dialog_filter_ctrl_space_and_context_menu(
+    qtbot: QtBot,
+    tmp_path: Path,
+) -> None:
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QListWidget, QPlainTextEdit
+    from app.core.glossary import GlossaryEntry, save_global_glossary
+    from app.ui.glossary_dialog import GlossaryDialog
+    from app.ui.main_window import ExpandedEditorDialog
+
+    app_data = tmp_path / "appdata"
+    save_global_glossary(
+        [GlossaryEntry(term="Spell", translations={"pt-BR": ["Magia"]})],
+        app_data_dir=app_data,
+    )
+
+    pkg = tmp_path / "gloss-ui-mod"
+    _write_json(
+        pkg / "module.json",
+        {
+            "id": "gloss-ui-mod",
+            "languages": [
+                {"lang": "en", "path": "lang/en.json"},
+                {"lang": "pt-BR", "path": "lang/pt-BR.json"},
+            ],
+        },
+    )
+    _write_json(
+        pkg / "lang/en.json",
+        {
+            "CAST": "Cast a Spell",
+            "EMPTY_KEY": "Spend a Spell",
+            "CLEAN": "Hello",
+        },
+    )
+    _write_json(
+        pkg / "lang/pt-BR.json",
+        {
+            "CAST": "Conjure uma bênção",
+            "CLEAN": "Olá",
+        },
+    )
+
+    win = MainWindow(app_data_dir=app_data)
+    qtbot.addWidget(win)
+    win.open_package_manifest(pkg / "module.json")
+    assert win.session is not None
+    # Projeto sobrescreve "Spell" para "Feitiço"
+    win.session.project_glossary = [
+        GlossaryEntry(term="Spell", translations={"pt-BR": ["Feitiço", "Feitiços"]})
+    ]
+    win.revalidate_session()
+    qtbot.waitUntil(lambda: not win.validation_in_progress, timeout=3000)
+
+    c_cast = win.table_model.get_cell(0, 2)
+    c_empty = win.table_model.get_cell(1, 2)
+    c_clean = win.table_model.get_cell(2, 2)
+    assert c_cast is not None and c_cast.active_glossary_issues
+    assert c_empty is not None and c_empty.active_glossary_issues == []  # missing não dispara alerta
+    assert c_clean is not None and c_clean.active_glossary_issues == []
+
+    # Filtro "Inconsistências de Glossário" exibe apenas CAST
+    gloss_idx = win.status_filter_combo.findData("glossary")
+    assert gloss_idx >= 0
+    win.status_filter_combo.setCurrentIndex(gloss_idx)
+    assert win.proxy_model.rowCount() == 1
+    win.status_filter_combo.setCurrentIndex(0)
+
+    # Ctrl+Space no editor inline abre popup e insere tradução preferida no cursor
+    idx_empty = win.proxy_model.index(1, 2)
+    win.table.setCurrentIndex(idx_empty)
+    editor = win.cell_delegate.createEditor(win.table, QStyleOptionViewItem(), idx_empty)
+    qtbot.addWidget(editor)
+    assert isinstance(editor, QPlainTextEdit)
+    win.cell_delegate.setEditorData(editor, idx_empty)
+    editor.setPlainText("Gaste ")
+    cursor = editor.textCursor()
+    cursor.setPosition(len("Gaste "))
+    editor.setTextCursor(cursor)
+    ev = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.ControlModifier)
+    from PySide6.QtWidgets import QApplication
+    QApplication.sendEvent(editor, ev)
+    popup = editor.findChild(QListWidget)
+    assert popup is not None and popup.count() >= 1
+    first_item = popup.item(0)
+    assert first_item is not None
+    popup.itemActivated.emit(first_item)
+    assert "Feitiço" in editor.toPlainText()
+
+    # Ctrl+Space também funciona no ExpandedEditorDialog
+    exp = ExpandedEditorDialog(
+        "Cast a Spell",
+        "Lance ",
+        "CAST",
+        "pt-BR",
+        win,
+        glossary_entries=win.merged_glossary(),
+    )
+    qtbot.addWidget(exp)
+    c2 = exp.target_edit.textCursor()
+    c2.setPosition(len("Lance "))
+    exp.target_edit.setTextCursor(c2)
+    ev2 = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.ControlModifier)
+    QApplication.sendEvent(exp.target_edit, ev2)
+    popup2 = exp.target_edit.findChild(QListWidget)
+    assert popup2 is not None and popup2.count() >= 1
+    popup2.itemActivated.emit(popup2.item(0))  # type: ignore[arg-type]
+    assert "Feitiço" in exp.target_edit.toPlainText()
+    # ExpandedEditorDialog exibe alerta de glossário em tempo real ao remover o termo preferido
+    exp.target_edit.setPlainText("Conjure uma bênção")
+    assert "Spell" in exp.live_alert_label.text()
+
+    # Ctrl+Space direto na célula vazia da tabela (sem editor aberto) preenche via QUndoStack
+    win.table.setCurrentIndex(idx_empty)
+    ev_tbl = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.ControlModifier)
+    QApplication.sendEvent(win.table, ev_tbl)
+    tbl_popup = win.table.findChild(QListWidget)
+    assert tbl_popup is not None and tbl_popup.count() >= 1
+    tbl_popup.itemActivated.emit(tbl_popup.item(0))  # type: ignore[arg-type]
+    assert c_empty.local_value == "Feitiço"
+
+    # GlossaryDialog pré-preenchido, preservação de idiomas não exibidos, case-sensitive e deduplicação CSV
+    gdlg = GlossaryDialog(
+        global_entries=[GlossaryEntry(term="Spell", translations={"pt-BR": ["Magia"]})],
+        project_entries=[
+            GlossaryEntry(term="HP", case_sensitive=True, do_not_translate=True),
+            GlossaryEntry(term="Cantrip", translations={"pt-BR": ["Truque antigo"], "fr": ["Tour"]}),
+        ],
+        target_langs=["pt-BR"],
+        prefill_term="Cantrip",
+        prefill_translation="Truque",
+        prefill_lang="pt-BR",
+        parent=win,
+    )
+    qtbot.addWidget(gdlg)
+    assert gdlg.term_input.text() == "Cantrip"
+    gdlg.save_form_entry()
+    cantrip = next(e for e in gdlg.project_entries() if e.term == "Cantrip")
+    assert cantrip.translations == {"pt-BR": ["Truque"], "fr": ["Tour"]}
+
+    # Adicionar entrada "hp" case_sensitive=True não sobrescreve "HP"
+    gdlg.term_input.setText("hp")
+    gdlg.case_cb.setChecked(True)
+    gdlg.dnt_cb.setChecked(True)
+    gdlg.save_form_entry()
+    terms = {e.term for e in gdlg.project_entries()}
+    assert {"HP", "hp"} <= terms
+
+    win.save_project(tmp_path / "gloss-ui.i18nproj")
+
+
 

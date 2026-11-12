@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from app.core.glossary import (
+    GlossaryEntry,
+    deserialize_glossary_entries,
+    serialize_glossary_entries,
+)
 from app.core.project_manager import (
     CellData,
     CellKind,
@@ -156,10 +161,13 @@ def _serialize_validation_config(session: PackageSession) -> dict[str, Any]:
             {"name": ce.name, "pattern": ce.pattern}
             for ce in session.custom_enrichers
         ],
+        "project_glossary": serialize_glossary_entries(session.project_glossary),
     }
 
 
-def _load_validation_config(raw: dict[str, Any]) -> tuple[list[IgnoredWarning], list[CustomEnricherRule]]:
+def _load_validation_config(
+    raw: dict[str, Any],
+) -> tuple[list[IgnoredWarning], list[CustomEnricherRule], list[GlossaryEntry]]:
     ignored: list[IgnoredWarning] = []
     for item in raw.get("ignored_warnings", []) or []:
         if not isinstance(item, dict):
@@ -183,7 +191,8 @@ def _load_validation_config(raw: dict[str, Any]) -> tuple[list[IgnoredWarning], 
                 pattern=str(item.get("pattern", "")),
             )
         )
-    return ignored, customs
+    glossary = deserialize_glossary_entries(raw.get("project_glossary", []))
+    return ignored, customs, glossary
 
 
 def _serialize_project_payload(session: PackageSession, project_dir: Path | None) -> dict[str, Any]:
@@ -486,6 +495,7 @@ def prepare_disk_sync(session: PackageSession) -> SyncPreview:
     fresh.missing_target_mapping = dict(session.missing_target_mapping)
     fresh.ignored_warnings = list(session.ignored_warnings)
     fresh.custom_enrichers = list(session.custom_enrichers)
+    fresh.project_glossary = list(session.project_glossary)
     report = _apply_saved_state_and_sync(
         fresh,
         saved_snapshots=session.file_snapshots,
@@ -582,17 +592,18 @@ def load_project_file(
 
     drafts = raw.get("drafts", {})
     review_state = raw.get("review_state", {})
-    ignored_warnings, custom_enrichers = _load_validation_config(raw)
+    ignored_warnings, custom_enrichers, project_glossary = _load_validation_config(raw)
 
     if apply_recovery_dir is not None and has_recovery_draft(session.project_id, apply_recovery_dir):
         rec_raw = json.loads(_recovery_path(session.project_id, apply_recovery_dir).read_text(encoding="utf-8"))
         drafts = rec_raw.get("drafts", drafts)
         review_state = rec_raw.get("review_state", review_state)
-        if "ignored_warnings" in rec_raw or "custom_enrichers" in rec_raw:
-            ignored_warnings, custom_enrichers = _load_validation_config(rec_raw)
+        if any(k in rec_raw for k in ("ignored_warnings", "custom_enrichers", "project_glossary")):
+            ignored_warnings, custom_enrichers, project_glossary = _load_validation_config(rec_raw)
 
     session.ignored_warnings = ignored_warnings
     session.custom_enrichers = custom_enrichers
+    session.project_glossary = project_glossary
 
     raw_snaps = raw.get("snapshots", {}).get("files", {})
     saved_snapshots = {

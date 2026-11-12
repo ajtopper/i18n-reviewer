@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
+from app.core.glossary import GlossaryEntry, lint_translation_glossary
 from app.core.validator import (
     CustomEnricherRule,
     IgnoredWarning,
@@ -15,8 +17,18 @@ from app.core.validator import (
 RowValidationSnapshot = tuple[int, str, str | None, dict[str, tuple[str | None, bool]]]
 
 
+@dataclass(frozen=True)
+class RowValidationResult:
+    """Validated diagnostics for one TableRowData row."""
+
+    row_index: int
+    base_issues: list[ValidationIssue]
+    cell_validation_issues: dict[str, list[ValidationIssue]]
+    cell_glossary_issues: dict[str, list[ValidationIssue]]
+
+
 class ValidationSignals(QObject):
-    """Qt signal carrier emitted from background validation workers."""
+    """Qt signal carrier emitted from background validation and glossary linting workers."""
 
     batch_ready = Signal(int, list)
     finished = Signal(int)
@@ -33,6 +45,7 @@ class ValidationRunnable(QRunnable):
         visible_count: int,
         custom_enrichers: list[CustomEnricherRule],
         ignored_warnings: list[IgnoredWarning],
+        glossary_entries: list[GlossaryEntry],
         signals: ValidationSignals,
     ) -> None:
         super().__init__()
@@ -42,18 +55,20 @@ class ValidationRunnable(QRunnable):
         self.visible_count = visible_count
         self.custom_enrichers = custom_enrichers
         self.ignored_warnings = ignored_warnings
+        self.glossary_entries = glossary_entries
         self.signals = signals
 
     def run(self) -> None:
         try:
-            batch: list[tuple[int, list[ValidationIssue], dict[str, list[ValidationIssue]]]] = []
+            batch: list[RowValidationResult] = []
             for pos, (row_idx, key_path, base_text, cell_map_in) in enumerate(self.ordered_snapshots):
                 if self._is_cancelled():
                     return
                 base_issues = inspect_base_defects(base_text, custom_enrichers=self.custom_enrichers)
-                cell_out: dict[str, list[ValidationIssue]] = {}
+                cell_val_out: dict[str, list[ValidationIssue]] = {}
+                cell_gloss_out: dict[str, list[ValidationIssue]] = {}
                 for lang, (val, is_dirty) in cell_map_in.items():
-                    cell_out[lang] = validate_translation(
+                    cell_val_out[lang] = validate_translation(
                         key_path,
                         lang,
                         base_text,
@@ -62,8 +77,23 @@ class ValidationRunnable(QRunnable):
                         ignored_warnings=self.ignored_warnings,
                         ignore_empty=not is_dirty,
                     )
-                batch.append((row_idx, base_issues, cell_out))
-                # Flush imediatamente o bloco de linhas visíveis antes das restantes
+                    cell_gloss_out[lang] = lint_translation_glossary(
+                        key_path,
+                        lang,
+                        base_text,
+                        val,
+                        self.glossary_entries,
+                        custom_enrichers=self.custom_enrichers,
+                        ignored_warnings=self.ignored_warnings,
+                    )
+                batch.append(
+                    RowValidationResult(
+                        row_index=row_idx,
+                        base_issues=base_issues,
+                        cell_validation_issues=cell_val_out,
+                        cell_glossary_issues=cell_gloss_out,
+                    )
+                )
                 at_visible_boundary = self.visible_count > 0 and (pos + 1) == self.visible_count
                 if at_visible_boundary or len(batch) >= 200:
                     self.signals.batch_ready.emit(self.generation, batch)
@@ -72,4 +102,3 @@ class ValidationRunnable(QRunnable):
                 self.signals.batch_ready.emit(self.generation, batch)
         finally:
             self.signals.finished.emit(self.generation)
-
