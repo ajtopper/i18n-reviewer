@@ -263,3 +263,72 @@ def test_mirror_routing_pending_conflicts_and_granular_restore(tmp_path: Path) -
     assert blocked_rels["lang/ui-pt-BR.json"].is_blocked is True
 
 
+def test_prepare_publish_plan_blocks_critical_validation_and_surfaces_warnings(tmp_path: Path) -> None:
+    from app.core.validator import IgnoredWarning, compute_value_hash
+
+    pkg = tmp_path / "val-pub-mod"
+    _write_json(
+        pkg / "module.json",
+        {
+            "id": "val-pub-mod",
+            "languages": [
+                {"lang": "en", "path": "lang/en.json"},
+                {"lang": "pt-BR", "path": "lang/pt-BR.json"},
+                {"lang": "es", "path": "lang/es.json"},
+            ],
+        },
+    )
+    _write_json(
+        pkg / "lang/en.json",
+        {
+            "PH": "Hit {target} with {target}",
+            "HTML": "See <b>manual</b> at https://ex.test",
+            "COL": "Gain @UUID[Compendium.a.b]{aura} for {aura}",
+        },
+    )
+    _write_json(
+        pkg / "lang/pt-BR.json",
+        {"PH": "Acerta {target} e {target}", "HTML": "Veja <b>manual</b> em https://ex.test", "COL": "Ganhe @UUID[Compendium.a.b]{aura} para {aura}"},
+    )
+    _write_json(
+        pkg / "lang/es.json",
+        {"PH": "Golpea {target} y {target}", "HTML": "Ver <b>manual</b> en https://ex.test", "COL": "Gana @UUID[Compendium.a.b]{aura} para {aura}"},
+    )
+
+    session = load_package_session(discover_manifest(pkg / "module.json"))
+    rows = {r.key_path: r for r in session.rows}
+
+    # pt-BR omite placeholder único {target} -> Erro Crítico -> bloqueia lang/pt-BR.json
+    rows["PH"].cells["pt-BR"].apply_edit("Acertou sem alvo", base_text=rows["PH"].base_text)
+    # es tem contagem diferente (1× em vez de 2×) e URL omitida -> apenas Aviso (não bloqueia!)
+    rows["PH"].cells["es"].apply_edit("Golpea a {target}", base_text=rows["PH"].base_text)
+    rows["HTML"].cells["es"].apply_edit("Ver <b>manual</b>", base_text=rows["HTML"].base_text)
+
+    plan = prepare_publish_plan(session)
+    by_rel = {fp.rel_path: fp for fp in plan.file_plans}
+    assert by_rel["lang/pt-BR.json"].is_blocked is True
+    assert by_rel["lang/es.json"].is_blocked is False
+    assert len(by_rel["lang/es.json"].validation_warnings) >= 2
+
+    # Ignorar este alerta em pt-BR desbloqueia o envio se o hash bater com o texto atual
+    session.ignored_warnings.append(
+        IgnoredWarning(
+            key_path="PH",
+            lang="pt-BR",
+            rule_id="placeholder_mismatch",
+            value_hash=compute_value_hash("Acertou sem alvo"),
+            reason="Justificativa",
+        )
+    )
+    plan_waived = prepare_publish_plan(session)
+    by_rel_waived = {fp.rel_path: fp for fp in plan_waived.file_plans}
+    assert by_rel_waived["lang/pt-BR.json"].is_blocked is False
+
+    # Alterar novamente o texto em pt-BR (ou limpar para "") invalida a exceção e volta a bloquear
+    rows["PH"].cells["pt-BR"].apply_edit("", base_text=rows["PH"].base_text)
+    plan_reblocked = prepare_publish_plan(session)
+    by_rel_reblocked = {fp.rel_path: fp for fp in plan_reblocked.file_plans}
+    assert by_rel_reblocked["lang/pt-BR.json"].is_blocked is True
+
+
+

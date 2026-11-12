@@ -17,6 +17,7 @@ from app.core.project_manager import (
     discover_manifest,
     load_package_session,
 )
+from app.core.validator import CustomEnricherRule, IgnoredWarning
 
 CURRENT_SCHEMA_VERSION = 1
 ConflictChoice = Literal["keep_local", "accept_disk", "manual"]
@@ -139,6 +140,52 @@ def _collect_drafts_and_review_state(
     return edits, deletions, review_state
 
 
+def _serialize_validation_config(session: PackageSession) -> dict[str, Any]:
+    return {
+        "ignored_warnings": [
+            {
+                "key_path": iw.key_path,
+                "lang": iw.lang,
+                "rule_id": iw.rule_id,
+                "value_hash": iw.value_hash,
+                "reason": iw.reason,
+            }
+            for iw in session.ignored_warnings
+        ],
+        "custom_enrichers": [
+            {"name": ce.name, "pattern": ce.pattern}
+            for ce in session.custom_enrichers
+        ],
+    }
+
+
+def _load_validation_config(raw: dict[str, Any]) -> tuple[list[IgnoredWarning], list[CustomEnricherRule]]:
+    ignored: list[IgnoredWarning] = []
+    for item in raw.get("ignored_warnings", []) or []:
+        if not isinstance(item, dict):
+            continue
+        ignored.append(
+            IgnoredWarning(
+                key_path=str(item.get("key_path", "")),
+                lang=str(item.get("lang", "")),
+                rule_id=str(item.get("rule_id", "")),
+                value_hash=str(item.get("value_hash", "")),
+                reason=str(item.get("reason", "")),
+            )
+        )
+    customs: list[CustomEnricherRule] = []
+    for item in raw.get("custom_enrichers", []) or []:
+        if not isinstance(item, dict):
+            continue
+        customs.append(
+            CustomEnricherRule(
+                name=str(item.get("name", "")),
+                pattern=str(item.get("pattern", "")),
+            )
+        )
+    return ignored, customs
+
+
 def _serialize_project_payload(session: PackageSession, project_dir: Path | None) -> dict[str, Any]:
     pkg_root = session.manifest.package_root
     pkg_rel = _compute_rel_path(pkg_root, project_dir) if project_dir is not None else None
@@ -190,6 +237,7 @@ def _serialize_project_payload(session: PackageSession, project_dir: Path | None
             "deletions": deletions,
         },
         "review_state": review_state,
+        **_serialize_validation_config(session),
     }
 
 
@@ -206,6 +254,7 @@ def write_recovery_draft(session: PackageSession, app_data_dir: Path | None = No
         "project_id": session.project_id,
         "drafts": {"edits": edits, "deletions": deletions},
         "review_state": review_state,
+        **_serialize_validation_config(session),
     }
     path = _recovery_path(session.project_id, app_data_dir)
     atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
@@ -435,6 +484,8 @@ def prepare_disk_sync(session: PackageSession) -> SyncPreview:
     fresh.project_id = session.project_id
     fresh.project_path = session.project_path
     fresh.missing_target_mapping = dict(session.missing_target_mapping)
+    fresh.ignored_warnings = list(session.ignored_warnings)
+    fresh.custom_enrichers = list(session.custom_enrichers)
     report = _apply_saved_state_and_sync(
         fresh,
         saved_snapshots=session.file_snapshots,
@@ -531,11 +582,17 @@ def load_project_file(
 
     drafts = raw.get("drafts", {})
     review_state = raw.get("review_state", {})
+    ignored_warnings, custom_enrichers = _load_validation_config(raw)
 
     if apply_recovery_dir is not None and has_recovery_draft(session.project_id, apply_recovery_dir):
         rec_raw = json.loads(_recovery_path(session.project_id, apply_recovery_dir).read_text(encoding="utf-8"))
         drafts = rec_raw.get("drafts", drafts)
         review_state = rec_raw.get("review_state", review_state)
+        if "ignored_warnings" in rec_raw or "custom_enrichers" in rec_raw:
+            ignored_warnings, custom_enrichers = _load_validation_config(rec_raw)
+
+    session.ignored_warnings = ignored_warnings
+    session.custom_enrichers = custom_enrichers
 
     raw_snaps = raw.get("snapshots", {}).get("files", {})
     saved_snapshots = {

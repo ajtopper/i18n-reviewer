@@ -24,6 +24,7 @@ from app.core.project_storage import (
     commit_sync_preview,
     prepare_disk_sync,
 )
+from app.core.validator import validate_translation
 
 DEFAULT_BACKUP_RETENTION = 30
 _RETRY_BACKOFFS = (0.1, 0.2, 0.3, 0.4, 0.5)
@@ -64,6 +65,7 @@ class PublishFilePlan:
     deleted_keys: set[str] = field(default_factory=set)
     unreviewed_dirty_keys: list[str] = field(default_factory=list)
     duplicate_keys: list[str] = field(default_factory=list)
+    validation_warnings: list[str] = field(default_factory=list)
     blocking_reasons: list[str] = field(default_factory=list)
     candidate_bytes: bytes = b""
 
@@ -282,6 +284,8 @@ class _FilePublishBucket:
     unreviewed: list[str] = field(default_factory=list)
     structural_conflicts: list[str] = field(default_factory=list)
     pending_sync_conflicts: list[str] = field(default_factory=list)
+    validation_criticals: list[str] = field(default_factory=list)
+    validation_warnings: list[str] = field(default_factory=list)
 
 
 def resolve_target_file_for_key(
@@ -359,6 +363,22 @@ def prepare_publish_plan(session: PackageSession) -> PublishPlan:
                 bucket.edits[row.key_path] = cell.local_value
                 if cell.review_status in ("unreviewed", "stale"):
                     bucket.unreviewed.append(row.key_path)
+                val_issues = validate_translation(
+                    row.key_path,
+                    lang,
+                    row.base_text,
+                    cell.local_value,
+                    custom_enrichers=session.custom_enrichers,
+                    ignored_warnings=session.ignored_warnings,
+                    ignore_empty=False,
+                )
+                for issue in val_issues:
+                    if issue.is_ignored:
+                        continue
+                    if issue.severity == "critical":
+                        bucket.validation_criticals.append(f"{row.key_path}: {issue.message}")
+                    elif issue.severity == "warning":
+                        bucket.validation_warnings.append(f"{row.key_path}: {issue.message}")
 
     for conflict_key, conflict_lang in sorted(session.pending_conflict_keys):
         crow = row_by_key.get(conflict_key)
@@ -385,8 +405,14 @@ def prepare_publish_plan(session: PackageSession) -> PublishPlan:
             edited_keys=bucket.edits,
             deleted_keys=bucket.deletions,
             unreviewed_dirty_keys=bucket.unreviewed,
+            validation_warnings=bucket.validation_warnings,
         )
 
+        if bucket.validation_criticals:
+            fp.blocking_reasons.append(
+                f"Erros críticos de validação ({len(bucket.validation_criticals)}): "
+                + "; ".join(bucket.validation_criticals[:5])
+            )
         if bucket.pending_sync_conflicts:
             fp.blocking_reasons.append(
                 f"Conflito de sincronização pendente nas chaves: {', '.join(bucket.pending_sync_conflicts)}"

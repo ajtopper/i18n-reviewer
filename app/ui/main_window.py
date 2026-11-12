@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Callable, cast
 
-from PySide6.QtCore import QEvent, QFileSystemWatcher, QModelIndex, QObject, QTimer, Qt
+from PySide6.QtCore import QEvent, QFileSystemWatcher, QModelIndex, QObject, QThreadPool, QTimer, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QKeyEvent, QKeySequence, QUndoStack
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -15,7 +15,9 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
+    QLayout,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -40,12 +42,14 @@ from app.core.backup_manager import (
     rollback_publish_batch,
 )
 from app.core.project_manager import (
+    CellData,
     CellKind,
     ManifestInfo,
     ManifestLangEntry,
     PackageNotFoundError,
     PackageSession,
     SyncConflict,
+    TableRowData,
     UnsupportedProjectVersionError,
     apply_conflict_resolutions,
     check_external_disk_changes,
@@ -61,6 +65,14 @@ from app.core.project_manager import (
     save_project_file,
     write_recovery_draft,
 )
+from app.core.validator import (
+    CustomEnricherRule,
+    ValidationIssue,
+    compute_value_hash,
+    inspect_base_defects,
+    missing_tokens_for_translation,
+    validate_translation,
+)
 from app.ui.commands import (
     EditCellCommand,
     RevertCellCommand,
@@ -70,7 +82,10 @@ from app.ui.commands import (
 from app.ui.backup_dialog import BackupDialog, PublishDialog
 from app.ui.conflict_dialog import ConflictResolutionDialog
 from app.ui.delegates import StatusCellDelegate
+from app.ui.enrichers_dialog import CustomEnrichersDialog
+from app.ui.highlighter import TokenHighlighter
 from app.ui.table_model import PackageFilterProxyModel, StatusFilterMode, TranslationTableModel
+from app.ui.validation_worker import RowValidationSnapshot, ValidationRunnable, ValidationSignals
 
 
 class OpenPackageDialog(QDialog):
@@ -157,6 +172,15 @@ class OpenPackageDialog(QDialog):
         return chosen
 
 
+def _clear_layout_widgets(layout: QLayout) -> None:
+    while layout.count():
+        item = layout.takeAt(0)
+        if item is not None:
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+
 class ExpandedEditorDialog(QDialog):
     """Side-by-side Base x Translation editor for long or multi-line strings (Shift+F2)."""
 
@@ -167,13 +191,23 @@ class ExpandedEditorDialog(QDialog):
         key_path: str,
         lang: str,
         parent: QWidget | None = None,
+        custom_enrichers: list[CustomEnricherRule] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Editor Expandido — {key_path} ({lang})")
-        self.resize(780, 420)
+        self.resize(820, 460)
+        self._base_text = base_text
+        self._key_path = key_path
+        self._lang = lang
+        self._custom_enrichers = list(custom_enrichers or [])
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"Chave: {key_path} · Idioma: {lang}"))
+
+        self.token_strip = QWidget()
+        self.token_strip_layout = QHBoxLayout(self.token_strip)
+        self.token_strip_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.token_strip)
 
         cols = QHBoxLayout()
         left_box = QVBoxLayout()
@@ -181,17 +215,24 @@ class ExpandedEditorDialog(QDialog):
         self.base_view = QPlainTextEdit()
         self.base_view.setReadOnly(True)
         self.base_view.setPlainText(base_text)
+        TokenHighlighter(self.base_view.document(), custom_enrichers=self._custom_enrichers)
         left_box.addWidget(self.base_view)
 
         right_box = QVBoxLayout()
         right_box.addWidget(QLabel(f"Tradução ({lang}):"))
         self.target_edit = QPlainTextEdit()
         self.target_edit.setPlainText(target_text)
+        TokenHighlighter(self.target_edit.document(), custom_enrichers=self._custom_enrichers)
+        self.target_edit.textChanged.connect(self._refresh_missing_strip)
         right_box.addWidget(self.target_edit)
 
         cols.addLayout(left_box, 1)
         cols.addLayout(right_box, 1)
         layout.addLayout(cols, 1)
+
+        self.live_alert_label = QLabel("")
+        self.live_alert_label.setWordWrap(True)
+        layout.addWidget(self.live_alert_label)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -199,7 +240,46 @@ class ExpandedEditorDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self._refresh_missing_strip()
         self.target_edit.setFocus()
+
+    def _insert_token_at_cursor(self, token: str) -> None:
+        cursor = self.target_edit.textCursor()
+        cursor.insertText(token)
+        self.target_edit.setTextCursor(cursor)
+        self.target_edit.setFocus()
+
+    def _refresh_missing_strip(self) -> None:
+        _clear_layout_widgets(self.token_strip_layout)
+        curr_text = self.target_edit.toPlainText()
+        missing = missing_tokens_for_translation(
+            self._base_text,
+            curr_text,
+            custom_enrichers=self._custom_enrichers,
+        )
+        if missing:
+            self.token_strip_layout.addWidget(QLabel("Inserir faltante:"))
+            for tok in missing[:10]:
+                btn = QPushButton(tok)
+                btn.clicked.connect(lambda _=False, t=tok: self._insert_token_at_cursor(t))
+                self.token_strip_layout.addWidget(btn)
+        self.token_strip_layout.addStretch()
+
+        issues = validate_translation(
+            self._key_path,
+            self._lang,
+            self._base_text,
+            curr_text,
+            custom_enrichers=self._custom_enrichers,
+        )
+        if issues:
+            self.live_alert_label.setText(
+                "Alertas: " + " | ".join(f"[{i.severity}] {i.message}" for i in issues)
+            )
+            self.live_alert_label.setStyleSheet("color: #b91c1c;")
+        else:
+            self.live_alert_label.setText("Sem alertas de validação.")
+            self.live_alert_label.setStyleSheet("color: #15803d;")
 
     def edited_text(self) -> str:
         return self.target_edit.toPlainText()
@@ -217,6 +297,11 @@ class MainWindow(QMainWindow):
         self._project_unsaved: bool = False
         self.lang_checkboxes: dict[str, QCheckBox] = {}
         self._lang_actions: list[QAction] = []
+        self._validation_gen: int = 0
+        self._active_validation_workers: int = 0
+        self._validation_signals = ValidationSignals(self)
+        self._validation_signals.batch_ready.connect(self._on_validation_batch_ready)
+        self._validation_signals.finished.connect(self._on_validation_finished)
 
         self.undo_stack = QUndoStack(self)
         self.table_model = TranslationTableModel(undo_stack=self.undo_stack)
@@ -270,6 +355,7 @@ class MainWindow(QMainWindow):
         self.status_filter_combo.addItem("Todas", "all")
         self.status_filter_combo.addItem("Apenas Pendentes", "pending")
         self.status_filter_combo.addItem("Apenas Editadas", "edited")
+        self.status_filter_combo.addItem("Todos os Alertas", "alerts")
         self.status_filter_combo.currentIndexChanged.connect(self._on_status_filter_changed)
         self.toolbar.addWidget(self.status_filter_combo)
 
@@ -300,6 +386,10 @@ class MainWindow(QMainWindow):
         self.toggle_inspector_button.setChecked(True)
         self.toggle_inspector_button.clicked.connect(self._toggle_inspector)
         self.toolbar.addWidget(self.toggle_inspector_button)
+
+        self.btn_custom_enrichers = QPushButton("Regras Enrichers...")
+        self.btn_custom_enrichers.clicked.connect(self.open_custom_enrichers_dialog)
+        self.toolbar.addWidget(self.btn_custom_enrichers)
 
         self.btn_restore_backup = QPushButton("Restaurar Backup")
         self.btn_restore_backup.clicked.connect(self.open_backup_dialog)
@@ -346,7 +436,11 @@ class MainWindow(QMainWindow):
 
         self.table = QTableView()
         self.table.setModel(self.proxy_model)
-        self.cell_delegate = StatusCellDelegate(self.table)
+        self.cell_delegate = StatusCellDelegate(
+            self.table,
+            custom_enrichers_getter=lambda: list(self.session.custom_enrichers) if self.session else [],
+            live_text_changed=self._on_inline_text_changed,
+        )
         self.table.setItemDelegate(self.cell_delegate)
         self.table.setWordWrap(True)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -377,6 +471,9 @@ class MainWindow(QMainWindow):
         self.inspector_stale_label.setVisible(False)
         self.inspector_diag_label = QLabel("")
         self.inspector_diag_label.setWordWrap(True)
+        self.inspector_actions_container = QWidget()
+        self.inspector_dynamic_layout = QVBoxLayout(self.inspector_actions_container)
+        self.inspector_dynamic_layout.setContentsMargins(0, 4, 0, 4)
 
         self.btn_review_next = QPushButton("Marcar Revisado + Próxima (Ctrl+Enter)")
         self.btn_review_next.clicked.connect(self.review_and_advance)
@@ -394,6 +491,7 @@ class MainWindow(QMainWindow):
         pv.addWidget(self.inspector_state_label)
         pv.addWidget(self.inspector_stale_label)
         pv.addWidget(self.inspector_diag_label)
+        pv.addWidget(self.inspector_actions_container)
         pv.addStretch()
         pv.addWidget(self.btn_review_next)
         pv.addWidget(self.btn_next_pending)
@@ -740,6 +838,7 @@ class MainWindow(QMainWindow):
                 if not self.save_project():
                     event.ignore()
                     return
+        self._validation_gen += 1
         if self.session is not None:
             clear_recovery_draft(self.session.project_id, self.app_data_dir)
         super().closeEvent(event)
@@ -787,6 +886,7 @@ class MainWindow(QMainWindow):
         if self.proxy_model.rowCount() > 0:
             col = 2 if session.target_langs else 1
             self.table.setCurrentIndex(self.proxy_model.index(0, col))
+        self._start_background_validation(session)
 
     def _rebuild_language_checkboxes(self, target_langs: list[str]) -> None:
         for action in self._lang_actions:
@@ -964,6 +1064,7 @@ class MainWindow(QMainWindow):
             row_data.key_path,
             lang,
             self,
+            custom_enrichers=self.session.custom_enrichers,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             new_val = dlg.edited_text()
@@ -991,8 +1092,9 @@ class MainWindow(QMainWindow):
         source_index = self.proxy_model.mapToSource(proxy_index)
         if not source_index.isValid() or source_index.column() < 2:
             return
+        row_data = self.table_model.get_row(source_index.row())
         cell = self.table_model.get_cell(source_index.row(), source_index.column())
-        if cell is None:
+        if row_data is None or cell is None:
             return
 
         menu = QMenu(self)
@@ -1004,9 +1106,296 @@ class MainWindow(QMainWindow):
         if cell.kind == CellKind.ORPHAN and not cell.readonly:
             label = "Cancelar remoção de órfã" if cell.marked_for_deletion else "Remover chave órfã..."
             menu.addAction(label, self.toggle_orphan_deletion_current_cell)
+
+        missing_toks, alert_items = self._cell_validation_action_specs(row_data, cell)
+        if missing_toks or alert_items:
+            menu.addSeparator()
+            for tok in missing_toks[:8]:
+                act_ins = menu.addAction(f"Inserir token faltante: {tok}")
+
+                def _make_ins(token: str) -> Callable[[bool], None]:
+                    def _handler(_checked: bool = False) -> None:
+                        self.insert_missing_token_for_current(token)
+
+                    return _handler
+
+                act_ins.triggered.connect(_make_ins(tok))
+            for rule_id, is_ignored in alert_items:
+                action_label = (
+                    f"Reativar alerta ({rule_id})"
+                    if is_ignored
+                    else f"Ignorar este alerta ({rule_id})..."
+                )
+                act_ig = menu.addAction(action_label)
+
+                def _make_ig(rid: str) -> Callable[[bool], None]:
+                    def _handler(_checked: bool = False) -> None:
+                        self.toggle_ignore_warning_current(rid)
+
+                    return _handler
+
+                act_ig.triggered.connect(_make_ig(rule_id))
+
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
-    def _on_cell_edited(self, _row: int, _col: int) -> None:
+    def _cell_validation_action_specs(
+        self,
+        row_data: TableRowData,
+        cell: CellData,
+    ) -> tuple[list[str], list[tuple[str, bool]]]:
+        custom_rules = self.session.custom_enrichers if self.session else []
+        missing_toks = (
+            missing_tokens_for_translation(
+                row_data.base_text,
+                cell.local_value,
+                custom_enrichers=custom_rules,
+            )
+            if cell.can_edit()
+            else []
+        )
+        alert_items = [(issue.rule_id, issue.is_ignored) for issue in cell.validation_issues]
+        return missing_toks, alert_items
+
+    @property
+    def validation_in_progress(self) -> bool:
+        """True while background QThreadPool validation workers are still active."""
+        return self._active_validation_workers > 0
+
+    def _visible_source_row_indices(self, total_rows: int) -> list[int]:
+        if total_rows == 0:
+            return []
+        top_proxy = max(0, self.table.rowAt(0))
+        bottom_proxy = self.table.rowAt(max(0, self.table.viewport().height() - 1))
+        if bottom_proxy < top_proxy:
+            bottom_proxy = min(self.proxy_model.rowCount() - 1, top_proxy + 40)
+        ordered: list[int] = []
+        seen: set[int] = set()
+        for prow in range(top_proxy, min(self.proxy_model.rowCount(), bottom_proxy + 1)):
+            srow = self.proxy_model.mapToSource(self.proxy_model.index(prow, 0)).row()
+            if 0 <= srow < total_rows and srow not in seen:
+                seen.add(srow)
+                ordered.append(srow)
+        return ordered
+
+    def _start_background_validation(self, session: PackageSession) -> None:
+        self._validation_gen += 1
+        gen = self._validation_gen
+        total = len(session.rows)
+        if total == 0:
+            self._active_validation_workers = 0
+            return
+
+        visible_idxs = self._visible_source_row_indices(total)
+        visible_set = set(visible_idxs)
+        rest_idxs = [i for i in range(total) if i not in visible_set]
+        ordered_idxs = visible_idxs + rest_idxs
+
+        snapshots: list[RowValidationSnapshot] = []
+        for idx in ordered_idxs:
+            r = session.rows[idx]
+            snapshots.append(
+                (
+                    idx,
+                    r.key_path,
+                    r.base_text,
+                    {lang: (c.local_value, c.is_dirty) for lang, c in r.cells.items()},
+                )
+            )
+
+        def _is_cancelled() -> bool:
+            return gen != self._validation_gen
+
+        self._active_validation_workers = 1
+        worker = ValidationRunnable(
+            generation=gen,
+            is_cancelled=_is_cancelled,
+            ordered_snapshots=snapshots,
+            visible_count=len(visible_idxs),
+            custom_enrichers=list(session.custom_enrichers),
+            ignored_warnings=list(session.ignored_warnings),
+            signals=self._validation_signals,
+        )
+        QThreadPool.globalInstance().start(worker, 5)
+
+    def _on_validation_batch_ready(
+        self,
+        gen: int,
+        batch: list[tuple[int, list[ValidationIssue], dict[str, list[ValidationIssue]]]],
+    ) -> None:
+        if gen != self._validation_gen or self.session is None:
+            return
+        rows = self.session.rows
+        for row_idx, base_issues, cell_map in batch:
+            if 0 <= row_idx < len(rows):
+                row_data = rows[row_idx]
+                row_data.base_issues = base_issues
+                for lang, issues in cell_map.items():
+                    cell = row_data.cells.get(lang)
+                    if cell is not None:
+                        cell.validation_issues = issues
+        self.table.viewport().update()
+        if self.proxy_model.status_filter == "alerts":
+            self.proxy_model.invalidateFilter()
+
+    def _on_validation_finished(self, gen: int) -> None:
+        if gen != self._validation_gen:
+            return
+        self._active_validation_workers = max(0, self._active_validation_workers - 1)
+        if self._active_validation_workers == 0 and self.session is not None:
+            self._refresh_statusbar(self.session)
+            self._on_current_changed(self.table.currentIndex(), QModelIndex())
+
+    def _validate_row_sync(self, source_row: int) -> None:
+        if self.session is None or not (0 <= source_row < len(self.session.rows)):
+            return
+        row_data = self.session.rows[source_row]
+        row_data.base_issues = inspect_base_defects(
+            row_data.base_text,
+            custom_enrichers=self.session.custom_enrichers,
+        )
+        for lang, cell in row_data.cells.items():
+            cell.validation_issues = validate_translation(
+                row_data.key_path,
+                lang,
+                row_data.base_text,
+                cell.local_value,
+                custom_enrichers=self.session.custom_enrichers,
+                ignored_warnings=self.session.ignored_warnings,
+                ignore_empty=not cell.is_dirty,
+            )
+        if self.proxy_model.status_filter == "alerts":
+            self.proxy_model.invalidateFilter()
+
+    def _on_inline_text_changed(self, target_cell: CellData, draft_text: str) -> None:
+        """Revalidate an actively edited inline cell synchronously per keystroke."""
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2 or self.session is None:
+            return
+        row_data = self.table_model.get_row(pos[0])
+        cell = self.table_model.get_cell(pos[0], pos[1])
+        if row_data is None or cell is not target_cell:
+            return
+        lang = self.session.target_langs[pos[1] - 2]
+        cell.validation_issues = validate_translation(
+            row_data.key_path,
+            lang,
+            row_data.base_text,
+            draft_text,
+            custom_enrichers=self.session.custom_enrichers,
+            ignored_warnings=self.session.ignored_warnings,
+            ignore_empty=(draft_text == cell.prod_value and not cell.is_dirty),
+        )
+        self.table.viewport().update()
+        self._refresh_inspector_diagnostics(row_data, cell, lang, live_text=draft_text)
+
+    def insert_missing_token_for_current(self, token: str) -> bool:
+        """Insert a missing protected token at the active cursor position via QUndoStack."""
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2 or self.session is None:
+            return False
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        if row_data is None or cell is None or not cell.can_edit():
+            return False
+
+        # Se um editor inline estiver aberto na célula atual, insere diretamente no cursor do editor
+        focus_w = self.table.focusWidget()
+        if isinstance(focus_w, QPlainTextEdit) and self.table.viewport().isAncestorOf(focus_w):
+            cursor = focus_w.textCursor()
+            cursor.insertText(token)
+            focus_w.setTextCursor(cursor)
+            return True
+
+        curr = cell.local_value or ""
+        cursor_pos = self.cell_delegate.cursor_pos_for(cell)
+        insert_at = len(curr) if cursor_pos is None else min(len(curr), max(0, cursor_pos))
+        new_text = curr[:insert_at] + token + curr[insert_at:]
+        self.cell_delegate.set_cursor_pos_for(cell, insert_at + len(token))
+        if not cell.will_apply_edit(new_text):
+            return False
+        self.undo_stack.push(
+            EditCellCommand(
+                cell=cell,
+                base_text=row_data.base_text,
+                new_value=new_text,
+                row=row,
+                col=col,
+                notify=self.table_model.notify_cell_changed,
+            )
+        )
+        return True
+
+    def toggle_ignore_warning_current(
+        self,
+        rule_id: str,
+        reason: str | None = None,
+    ) -> bool:
+        """Ignore or un-ignore a validation rule on the current cell for its current text hash."""
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2 or self.session is None:
+            return False
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        if row_data is None or cell is None:
+            return False
+        lang = self.session.target_langs[col - 2]
+        val_hash = compute_value_hash(cell.local_value)
+
+        currently_ignored = self.session.has_ignored_warning(
+            row_data.key_path, lang, rule_id, val_hash
+        )
+        if currently_ignored:
+            self.session.set_ignored_warning(
+                row_data.key_path, lang, rule_id, val_hash, ignore=False
+            )
+        else:
+            justification = reason
+            if justification is None:
+                text, ok = QInputDialog.getText(
+                    self,
+                    "Ignorar este alerta",
+                    f"Justificativa opcional para ignorar '{rule_id}' em {row_data.key_path} ({lang}):",
+                )
+                if not ok:
+                    return False
+                justification = text.strip()
+            self.session.set_ignored_warning(
+                row_data.key_path,
+                lang,
+                rule_id,
+                val_hash,
+                ignore=True,
+                reason=justification,
+            )
+
+        self._validate_row_sync(row)
+        self._project_unsaved = True
+        self._update_window_title()
+        write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
+        self.table_model.notify_cell_changed(row, col)
+        return True
+
+    def open_custom_enrichers_dialog(self) -> bool:
+        """Open project dialog to edit custom enricher regexes and revalidate the session."""
+        if self.session is None:
+            return False
+        dlg = CustomEnrichersDialog(self.session.custom_enrichers, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        self.session.custom_enrichers = dlg.rules()
+        self._project_unsaved = True
+        self._update_window_title()
+        write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
+        self._start_background_validation(self.session)
+        return True
+
+    def _clear_inspector_dynamic_actions(self) -> None:
+        _clear_layout_widgets(self.inspector_dynamic_layout)
+
+    def _on_cell_edited(self, row: int, _col: int) -> None:
+        self._validate_row_sync(row)
         if self.session is not None:
             self._project_unsaved = True
             self._update_window_title()
@@ -1032,7 +1421,9 @@ class MainWindow(QMainWindow):
             )
             self.inspector_state_label.setText("Estado: Referência (somente leitura)")
             self.inspector_stale_label.setVisible(False)
-            self.inspector_diag_label.setText("")
+            base_diags = [f"[{i.severity}] {i.message}" for i in row_data.base_issues]
+            self.inspector_diag_label.setText("\n".join(base_diags) if base_diags else "")
+            self._clear_inspector_dynamic_actions()
             return
 
         lang = self.session.target_langs[col - 2]
@@ -1057,6 +1448,18 @@ class MainWindow(QMainWindow):
         else:
             self.inspector_stale_label.setVisible(False)
 
+        self._refresh_inspector_diagnostics(row_data, cell, lang)
+
+    def _refresh_inspector_diagnostics(
+        self,
+        row_data: TableRowData,
+        cell: CellData,
+        lang: str,
+        *,
+        live_text: str | None = None,
+    ) -> None:
+        if self.session is None:
+            return
         diags: list[str] = []
         files_to_check = [cell.source_file] if cell.source_file else []
         for fatal_path in self.session.fatal_files_by_lang.get(lang, []):
@@ -1069,4 +1472,41 @@ class MainWindow(QMainWindow):
         for w in self.session.warnings:
             if w.kind == "multi_file_collision" and w.lang == lang and w.key_path == row_data.key_path:
                 diags.append(f"[{w.kind}] {w.message}")
+        for base_iss in row_data.base_issues:
+            diags.append(f"[base:{base_iss.severity}] {base_iss.message}")
+        for v_iss in cell.validation_issues:
+            tag = f"{v_iss.severity} (ignorado)" if v_iss.is_ignored else v_iss.severity
+            reason_sfx = f" — {v_iss.ignored_reason}" if v_iss.ignored_reason else ""
+            diags.append(f"[{tag}:{v_iss.rule_id}] {v_iss.message}{reason_sfx}")
+
         self.inspector_diag_label.setText("\n".join(diags) if diags else "Diagnóstico do arquivo: OK")
+        self._clear_inspector_dynamic_actions()
+        if live_text is not None:
+            missing_toks = (
+                missing_tokens_for_translation(
+                    row_data.base_text,
+                    live_text,
+                    custom_enrichers=self.session.custom_enrichers,
+                )
+                if cell.can_edit()
+                else []
+            )
+            alert_items = [(v.rule_id, v.is_ignored) for v in cell.validation_issues]
+        else:
+            missing_toks, alert_items = self._cell_validation_action_specs(row_data, cell)
+
+        for tok in missing_toks[:6]:
+            btn = QPushButton(f"Inserir: {tok}")
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.clicked.connect(lambda _=False, t=tok: self.insert_missing_token_for_current(t))
+            self.inspector_dynamic_layout.addWidget(btn)
+        for rule_id, is_ignored in alert_items:
+            lbl = (
+                f"Reativar alerta ({rule_id})"
+                if is_ignored
+                else f"Ignorar este alerta ({rule_id})"
+            )
+            btn = QPushButton(lbl)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.clicked.connect(lambda _=False, r=rule_id: self.toggle_ignore_warning_current(r))
+            self.inspector_dynamic_layout.addWidget(btn)

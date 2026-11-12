@@ -15,7 +15,8 @@ from PySide6.QtGui import QColor, QFont, QUndoStack
 from app.core.project_manager import CellData, CellKind, PackageSession, TableRowData
 from app.ui.commands import EditCellCommand
 
-StatusFilterMode = Literal["all", "pending", "edited"]
+StatusFilterMode = Literal["all", "pending", "edited", "alerts"]
+BASE_ISSUES_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 
 class TranslationTableModel(QAbstractTableModel):
@@ -166,6 +167,9 @@ class TranslationTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.UserRole:
             return self.get_cell(index.row(), col)
 
+        if role == BASE_ISSUES_ROLE and col == 1:
+            return row_data.base_issues
+
         return None
 
     def setData(
@@ -252,6 +256,12 @@ class PackageFilterProxyModel(QSortFilterProxyModel):
                 return False
         elif self.status_filter == "edited":
             if not any(c.is_dirty for c in row_data.cells.values()):
+                return False
+        elif self.status_filter == "alerts":
+            if not any(
+                c.validation_severity in ("critical", "warning")
+                for c in row_data.cells.values()
+            ):
                 return False
 
         if self.search_query and not row_data.matches_search(self.search_query):

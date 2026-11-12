@@ -493,3 +493,107 @@ def test_ticket02_row_height_cap_and_10k_scale(qtbot: QtBot, tmp_path: Path) -> 
     assert sz.height() <= 115
 
 
+def test_ticket05_validation_filter_highlighter_token_insert_ignore_and_custom_enrichers(
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    from PySide6.QtGui import QSyntaxHighlighter
+    from PySide6.QtWidgets import QInputDialog, QPlainTextEdit
+    from app.core.validator import CustomEnricherRule
+    from app.ui.main_window import ExpandedEditorDialog
+
+    app_data = tmp_path / "appdata"
+    pkg = tmp_path / "val-ui-mod"
+    _write_json(
+        pkg / "module.json",
+        {
+            "id": "val-ui-mod",
+            "languages": [
+                {"lang": "en", "path": "lang/en.json"},
+                {"lang": "pt-BR", "path": "lang/pt-BR.json"},
+            ],
+        },
+    )
+    _write_json(
+        pkg / "lang/en.json",
+        {
+            "OK_KEY": "Hello {name}",
+            "PH_ERR": "Hello {name}",
+            "URL_WARN": "Docs at https://foundryvtt.com",
+            "BASE_COL": "Gain @UUID[Compendium.a.b]{power} for {power}",
+        },
+    )
+    _write_json(
+        pkg / "lang/pt-BR.json",
+        {
+            "OK_KEY": "Olá {name}",
+            "PH_ERR": "Olá mundo",
+            "URL_WARN": "Docs aqui",
+            "BASE_COL": "Ganhe @UUID[Compendium.a.b]{poder} para {power}",
+        },
+    )
+
+    win = MainWindow(app_data_dir=app_data)
+    qtbot.addWidget(win)
+    win.open_package_manifest(pkg / "module.json")
+
+    # Validação inicial em QThreadPool termina populando alertas
+    qtbot.waitUntil(lambda: not win.validation_in_progress, timeout=3000)
+
+    c_err = win.table_model.get_cell(1, 2)
+    c_warn = win.table_model.get_cell(2, 2)
+    c_ok = win.table_model.get_cell(0, 2)
+    r_col = win.table_model.get_row(3)
+    assert c_err is not None and c_err.validation_severity == "critical"
+    assert c_warn is not None and c_warn.validation_severity == "warning"
+    assert c_ok is not None and c_ok.validation_severity is None
+    assert r_col is not None and any(i.severity == "info" for i in r_col.base_issues)
+
+    # Filtro "Todos os Alertas" exibe apenas linhas com erro crítico ou aviso ativo (PH_ERR e URL_WARN)
+    alerts_idx = win.status_filter_combo.findData("alerts")
+    assert alerts_idx >= 0
+    win.status_filter_combo.setCurrentIndex(alerts_idx)
+    assert win.proxy_model.rowCount() == 2
+    win.status_filter_combo.setCurrentIndex(0)
+
+    # Editor inline e ExpandedEditorDialog usam TokenHighlighter (QSyntaxHighlighter) e revalidam ao vivo
+    idx_err = win.proxy_model.index(1, 2)
+    win.table.setCurrentIndex(idx_err)
+    editor = win.cell_delegate.createEditor(win.table, QStyleOptionViewItem(), idx_err)
+    qtbot.addWidget(editor)
+    assert isinstance(editor, QPlainTextEdit)
+    assert editor.findChildren(QSyntaxHighlighter)
+    win.cell_delegate.setEditorData(editor, idx_err)
+    editor.setPlainText("Olá {name}")
+    assert c_err.validation_severity is None
+    editor.setPlainText("Olá mundo")
+    assert c_err.validation_severity == "critical"
+
+    exp = ExpandedEditorDialog("Hello {name}", "Olá mundo", "PH_ERR", "pt-BR", win)
+    qtbot.addWidget(exp)
+    assert exp.base_view.findChildren(QSyntaxHighlighter)
+    assert exp.target_edit.findChildren(QSyntaxHighlighter)
+
+    # Reinserção rápida de token faltante via Inspector/ação com QUndoStack + Undo/Redo
+    assert win.insert_missing_token_for_current("{name}") is True
+    assert c_err.local_value == "Olá mundo{name}" or "{name}" in (c_err.local_value or "")
+    assert c_err.validation_severity is None  # Reavaliação síncrona limpou erro!
+
+    win.undo_stack.undo()
+    assert c_err.local_value == "Olá mundo"
+    assert c_err.validation_severity == "critical"
+
+    # Ignorar este alerta com justificativa -> limpa gravidade ativa e persiste no .i18nproj
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **kw: ("Intencional", True))  # type: ignore[attr-defined]
+    assert win.toggle_ignore_warning_current("placeholder_mismatch") is True
+    assert c_err.validation_severity is None
+
+    # Aplicar regra customizada e salvar projeto
+    assert win.session is not None
+    win.session.custom_enrichers.append(CustomEnricherRule(name="MyTag", pattern=r"%[A-Z]+%"))
+    proj_path = tmp_path / "val-ui.i18nproj"
+    win.save_project(proj_path)
+
+
+

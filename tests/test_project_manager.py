@@ -464,5 +464,44 @@ def test_three_way_merge_stale_transition_and_invalid_disk_blocking(tmp_path: Pa
     assert "lang/pt-BR.json" in blocked_rep.blocked_files
 
 
+def test_ignored_warnings_and_custom_enrichers_persist_in_i18nproj(tmp_path: Path) -> None:
+    from app.core.validator import CustomEnricherRule, IgnoredWarning, compute_value_hash
+
+    app_data = tmp_path / "appdata"
+    pkg = tmp_path / "rules-mod"
+    _write_json(
+        pkg / "module.json",
+        {
+            "id": "rules-mod",
+            "languages": [
+                {"lang": "en", "path": "lang/en.json"},
+                {"lang": "pt-BR", "path": "lang/pt-BR.json"},
+            ],
+        },
+    )
+    _write_json(pkg / "lang/en.json", {"K1": "Hi {name}", "K2": "Run %MACRO%"})
+    _write_json(pkg / "lang/pt-BR.json", {"K1": "Oi mundo", "K2": "Executar %MACRO%"})
+
+    session = load_package_session(discover_manifest(pkg / "module.json"))
+    session.custom_enrichers = [CustomEnricherRule(name="PercMacro", pattern=r"%[A-Z]+%")]
+    session.ignored_warnings = [
+        IgnoredWarning(
+            key_path="K1",
+            lang="pt-BR",
+            rule_id="placeholder_mismatch",
+            value_hash=compute_value_hash("Oi mundo"),
+            reason="Texto simplificado",
+        )
+    ]
+
+    proj_file = tmp_path / "rules.i18nproj"
+    save_project_file(session, proj_file, app_data_dir=app_data)
+
+    reopened = load_project_file(proj_file)
+    assert reopened.session.custom_enrichers == session.custom_enrichers
+    assert reopened.session.ignored_warnings == session.ignored_warnings
+
+
+
 
 

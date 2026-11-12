@@ -93,6 +93,11 @@ class PublishDialog(QDialog):
                     f"• [{fp.rel_path}] {len(fp.unreviewed_dirty_keys)} célula(s) editada(s) ainda não revisada(s): "
                     + ", ".join(fp.unreviewed_dirty_keys[:8])
                 )
+            if fp.validation_warnings:
+                lines.append(
+                    f"• [{fp.rel_path}] {len(fp.validation_warnings)} aviso(s) de validação: "
+                    + "; ".join(fp.validation_warnings[:5])
+                )
             if fp.deleted_keys:
                 lines.append(
                     f"• [{fp.rel_path}] Chaves órfãs que serão removidas: {', '.join(sorted(fp.deleted_keys))}"

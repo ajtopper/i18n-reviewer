@@ -15,6 +15,12 @@ from app.core.json_handler import (
     ParsedLangDocument,
     parse_lang_bytes,
 )
+from app.core.validator import (
+    CustomEnricherRule,
+    IgnoredWarning,
+    IssueSeverity,
+    ValidationIssue,
+)
 
 _PLURAL_SUFFIXES = frozenset({"zero", "one", "two", "few", "many", "other"})
 _CLDR_CATEGORIES: dict[str, tuple[str, ...]] = {
@@ -115,6 +121,20 @@ class CellData:
     marked_for_deletion: bool = False
     review_status: ReviewStatus = "unreviewed"
     previous_base: str | None = None
+    validation_issues: list[ValidationIssue] = field(default_factory=list, compare=False, repr=False)
+
+    @property
+    def active_validation_issues(self) -> list[ValidationIssue]:
+        return [i for i in self.validation_issues if not i.is_ignored]
+
+    @property
+    def validation_severity(self) -> IssueSeverity | None:
+        active = self.active_validation_issues
+        if any(i.severity == "critical" for i in active):
+            return "critical"
+        if any(i.severity == "warning" for i in active):
+            return "warning"
+        return None
 
     @property
     def is_missing(self) -> bool:
@@ -257,6 +277,7 @@ class TableRowData:
     base_line: int = 0
     is_orphan_row: bool = False
     cells: dict[str, CellData] = field(default_factory=dict)
+    base_issues: list[ValidationIssue] = field(default_factory=list, compare=False, repr=False)
     _search_blob: str = field(default="", init=False, repr=False)
 
     def rebuild_search_blob(self) -> None:
@@ -318,6 +339,51 @@ class PackageSession:
     enabled_paths: list[str] = field(default_factory=list)
     missing_target_mapping: dict[str, str] = field(default_factory=dict)
     pending_conflict_keys: set[tuple[str, str]] = field(default_factory=set)
+    ignored_warnings: list[IgnoredWarning] = field(default_factory=list)
+    custom_enrichers: list[CustomEnricherRule] = field(default_factory=list)
+
+    def has_ignored_warning(
+        self,
+        key_path: str,
+        lang: str,
+        rule_id: str,
+        value_hash: str,
+    ) -> bool:
+        """Return True if an exception matching (key_path, lang, rule_id, value_hash) exists."""
+        return any(
+            iw.key_path == key_path
+            and iw.lang == lang
+            and iw.rule_id == rule_id
+            and iw.value_hash == value_hash
+            for iw in self.ignored_warnings
+        )
+
+    def set_ignored_warning(
+        self,
+        key_path: str,
+        lang: str,
+        rule_id: str,
+        value_hash: str,
+        *,
+        ignore: bool,
+        reason: str = "",
+    ) -> None:
+        """Add or remove a per-cell validation exception matching rule_id and current value_hash."""
+        self.ignored_warnings = [
+            iw
+            for iw in self.ignored_warnings
+            if not (iw.key_path == key_path and iw.lang == lang and iw.rule_id == rule_id)
+        ]
+        if ignore:
+            self.ignored_warnings.append(
+                IgnoredWarning(
+                    key_path=key_path,
+                    lang=lang,
+                    rule_id=rule_id,
+                    value_hash=value_hash,
+                    reason=reason,
+                )
+            )
 
 
 def cldr_categories_for_lang(lang: str) -> tuple[str, ...]:

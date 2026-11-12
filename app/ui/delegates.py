@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from PySide6.QtCore import QAbstractItemModel, QModelIndex, QPersistentModelIndex, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import QPlainTextEdit, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QWidget
 
 from app.core.project_manager import CellData, CellKind
+from app.core.validator import CustomEnricherRule
+from app.ui.highlighter import TokenHighlighter
+from app.ui.table_model import BASE_ISSUES_ROLE
 
 
 _KIND_BADGES: dict[CellKind, tuple[str, str, str]] = {
@@ -42,12 +47,29 @@ class StatusCellDelegate(QStyledItemDelegate):
     BADGE_STRIP_H = 18
     MAX_ROW_HEIGHT = 110
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        custom_enrichers_getter: Callable[[], list[CustomEnricherRule]] | None = None,
+        live_text_changed: Callable[[CellData, str], None] | None = None,
+    ) -> None:
         super().__init__(parent)
         self._height_cache: dict[tuple[int, int, int, str], int] = {}
+        self._custom_enrichers_getter = custom_enrichers_getter
+        self._live_text_changed = live_text_changed
+        self._cursor_positions: dict[int, int] = {}
+        self._populating_editor = False
+
+    def cursor_pos_for(self, cell: CellData) -> int | None:
+        """Return last known editor cursor offset for a cell, if any."""
+        return self._cursor_positions.get(id(cell))
+
+    def set_cursor_pos_for(self, cell: CellData, pos: int) -> None:
+        self._cursor_positions[id(cell)] = max(0, pos)
 
     def invalidate_cache(self) -> None:
         self._height_cache.clear()
+        self._cursor_positions.clear()
 
     def sizeHint(
         self,
@@ -81,6 +103,13 @@ class StatusCellDelegate(QStyledItemDelegate):
         cell = index.data(Qt.ItemDataRole.UserRole)
         if not isinstance(cell, CellData):
             super().paint(painter, option, index)
+            if index.column() == 1:
+                base_issues = index.data(BASE_ISSUES_ROLE)
+                if isinstance(base_issues, list) and base_issues:
+                    painter.save()
+                    stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
+                    painter.fillRect(stripe, QColor("#3b82f6"))
+                    painter.restore()
             return
 
         painter.save()
@@ -94,10 +123,11 @@ class StatusCellDelegate(QStyledItemDelegate):
         text_opt.rect = option.rect.adjusted(6, self.BADGE_STRIP_H, -4, -2)
         super().paint(painter, text_opt, index)
 
-        if cell.kind == CellKind.STRUCTURAL_CONFLICT:
+        val_sev = cell.validation_severity
+        if cell.kind == CellKind.STRUCTURAL_CONFLICT or val_sev == "critical":
             stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
             painter.fillRect(stripe, QColor("#dc2626"))
-        elif cell.kind in (CellKind.EMPTY, CellKind.ORPHAN, CellKind.NON_STRING):
+        elif val_sev == "warning" or cell.kind in (CellKind.EMPTY, CellKind.ORPHAN, CellKind.NON_STRING):
             stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
             painter.fillRect(stripe, QColor("#f59e0b"))
 
@@ -122,6 +152,23 @@ class StatusCellDelegate(QStyledItemDelegate):
     ) -> QWidget:
         editor = QPlainTextEdit(parent)
         editor.setTabChangesFocus(True)
+        rules = self._custom_enrichers_getter() if self._custom_enrichers_getter else []
+        TokenHighlighter(editor.document(), custom_enrichers=rules)
+        cell = index.data(Qt.ItemDataRole.UserRole)
+        if isinstance(cell, CellData):
+            def _on_cursor_changed(c: CellData = cell, ed: QPlainTextEdit = editor) -> None:
+                if not self._populating_editor:
+                    self.set_cursor_pos_for(c, ed.textCursor().position())
+
+            editor.cursorPositionChanged.connect(_on_cursor_changed)
+            if self._live_text_changed is not None:
+                cb = self._live_text_changed
+
+                def _on_live_text(c: CellData = cell, ed: QPlainTextEdit = editor) -> None:
+                    if not self._populating_editor:
+                        cb(c, ed.toPlainText())
+
+                editor.textChanged.connect(_on_live_text)
         return editor
 
     def setEditorData(
@@ -130,7 +177,11 @@ class StatusCellDelegate(QStyledItemDelegate):
         index: QModelIndex | QPersistentModelIndex,
     ) -> None:
         if isinstance(editor, QPlainTextEdit):
-            editor.setPlainText(str(index.data(Qt.ItemDataRole.EditRole) or ""))
+            self._populating_editor = True
+            try:
+                editor.setPlainText(str(index.data(Qt.ItemDataRole.EditRole) or ""))
+            finally:
+                self._populating_editor = False
 
     def setModelData(
         self,
@@ -139,4 +190,7 @@ class StatusCellDelegate(QStyledItemDelegate):
         index: QModelIndex | QPersistentModelIndex,
     ) -> None:
         if isinstance(editor, QPlainTextEdit):
+            cell = index.data(Qt.ItemDataRole.UserRole)
+            if isinstance(cell, CellData):
+                self.set_cursor_pos_for(cell, editor.textCursor().position())
             model.setData(index, editor.toPlainText(), Qt.ItemDataRole.EditRole)
