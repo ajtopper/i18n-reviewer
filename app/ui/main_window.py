@@ -32,6 +32,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.backup_manager import (
+    commit_publish_result,
+    execute_publish_plan,
+    prepare_publish_plan,
+    restore_backup,
+    rollback_publish_batch,
+)
 from app.core.project_manager import (
     CellKind,
     ManifestInfo,
@@ -60,6 +67,7 @@ from app.ui.commands import (
     ReviewCellCommand,
     ToggleOrphanDeletionCommand,
 )
+from app.ui.backup_dialog import BackupDialog, PublishDialog
 from app.ui.conflict_dialog import ConflictResolutionDialog
 from app.ui.delegates import StatusCellDelegate
 from app.ui.table_model import PackageFilterProxyModel, StatusFilterMode, TranslationTableModel
@@ -292,6 +300,17 @@ class MainWindow(QMainWindow):
         self.toggle_inspector_button.setChecked(True)
         self.toggle_inspector_button.clicked.connect(self._toggle_inspector)
         self.toolbar.addWidget(self.toggle_inspector_button)
+
+        self.btn_restore_backup = QPushButton("Restaurar Backup")
+        self.btn_restore_backup.clicked.connect(self.open_backup_dialog)
+        self.toolbar.addWidget(self.btn_restore_backup)
+
+        self.btn_publish = QPushButton("Enviar para Produção")
+        self.btn_publish.setStyleSheet(
+            "QPushButton { background: #15803d; color: white; font-weight: bold; padding: 4px 10px; border-radius: 4px; }"
+        )
+        self.btn_publish.clicked.connect(self.publish_to_production)
+        self.toolbar.addWidget(self.btn_publish)
 
     def _build_central(self) -> None:
         container = QWidget()
@@ -526,10 +545,15 @@ class MainWindow(QMainWindow):
         self.load_session(session, preserve_unsaved=self._project_unsaved)
         if loaded.sync_report.conflicts:
             if self._prompt_conflict_resolutions(session, loaded.sync_report.conflicts):
+                session.pending_conflict_keys.clear()
                 self._project_unsaved = True
                 self.table_model.set_session(session)
                 self._refresh_statusbar(session)
                 self._update_window_title()
+            else:
+                session.pending_conflict_keys = {
+                    (c.key_path, c.lang) for c in loaded.sync_report.conflicts
+                }
         return True
 
     def save_project(self, project_path: Path | None = None) -> bool:
@@ -579,11 +603,107 @@ class MainWindow(QMainWindow):
             return
         if preview.report.conflicts:
             if not self._prompt_conflict_resolutions(preview.fresh_session, preview.report.conflicts):
+                self.session.pending_conflict_keys = {
+                    (c.key_path, c.lang) for c in preview.report.conflicts
+                }
                 return
             self._project_unsaved = True
         commit_sync_preview(self.session, preview)
         self.load_session(self.session, preserve_unsaved=self._project_unsaved)
         self.external_change_banner.setVisible(False)
+
+    def publish_to_production(self) -> bool:
+        if self.session is None:
+            return False
+        plan = prepare_publish_plan(self.session)
+        if plan.external_changes:
+            QMessageBox.warning(
+                self,
+                "Alteração externa detectada",
+                "Arquivos do pacote mudaram no disco. Sincronize antes de enviar para produção.",
+            )
+            self.sync_with_disk()
+            return False
+        if not plan.file_plans:
+            QMessageBox.information(self, "Nada a publicar", "Nenhuma célula editada ou órfã marcada.")
+            return False
+
+        dlg = PublishDialog(plan, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        chosen = dlg.selected_plans()
+        if not chosen:
+            return False
+
+        result = execute_publish_plan(self.session, chosen, app_data_dir=self.app_data_dir)
+        if result.failed_file is not None:
+            ans = QMessageBox.question(
+                self,
+                "Falha parcial no envio",
+                f"Falha ao gravar '{result.failed_file}': {result.error}\n"
+                f"Arquivos já gravados: {', '.join(result.published_files) or '(nenhum)'}.\n\n"
+                "Deseja reverter imediatamente os arquivos já gravados neste lote?",
+            )
+            if ans == QMessageBox.StandardButton.Yes and result.batch_id is not None:
+                rollback_publish_batch(
+                    self.session,
+                    result.batch_id,
+                    rel_paths=result.published_files,
+                    app_data_dir=self.app_data_dir,
+                )
+            else:
+                commit_publish_result(self.session, result)
+
+        self._project_unsaved = True
+        write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
+        self.load_session(self.session, preserve_unsaved=True)
+        return result.failed_file is None
+
+    def open_backup_dialog(self) -> bool:
+        if self.session is None:
+            return False
+        dlg = BackupDialog(self.session.project_id, app_data_dir=self.app_data_dir, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        choice = dlg.restore_choice()
+        if choice is None:
+            return False
+        try:
+            restore_res = restore_backup(
+                self.session,
+                batch_id=choice.batch_id,
+                rel_paths=choice.rel_paths,
+                discard_local_drafts=choice.discard_local_drafts,
+                app_data_dir=self.app_data_dir,
+            )
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Erro ao restaurar backup", str(exc))
+            return False
+
+        preview = restore_res.sync_preview
+        if preview is not None:
+            if preview.report.blocked_files:
+                QMessageBox.warning(
+                    self,
+                    "Sincronização após restauração bloqueada",
+                    f"Arquivos bloqueados ao sincronizar restauração: {', '.join(preview.report.blocked_files)}",
+                )
+            elif preview.report.conflicts:
+                resolved = self._prompt_conflict_resolutions(
+                    preview.fresh_session,
+                    preview.report.conflicts,
+                )
+                pending = (
+                    set()
+                    if resolved
+                    else {(c.key_path, c.lang) for c in preview.report.conflicts}
+                )
+                commit_sync_preview(self.session, preview)
+                self.session.pending_conflict_keys = pending
+
+        self._project_unsaved = True
+        self.load_session(self.session, preserve_unsaved=True)
+        return True
 
     def _prompt_conflict_resolutions(
         self,

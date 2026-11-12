@@ -228,6 +228,24 @@ class CellData:
         self.marked_for_deletion = flag
         return True
 
+    def mark_published(self, source_file: str, base_text: str | None = None) -> None:
+        """Promote the published local value to production and update cell metadata."""
+        self.prod_value = self.local_value
+        self.source_file = source_file
+        self.marked_for_deletion = False
+        if self.local_value is None:
+            self.kind = CellKind.MISSING
+        elif self.kind != CellKind.ORPHAN:
+            self._recompute_kind(base_text)
+
+    def clear_after_deletion(self) -> None:
+        """Reset cell state after its orphan key was removed from production."""
+        self.prod_value = None
+        self.local_value = None
+        self.marked_for_deletion = False
+        self.source_file = ""
+        self.kind = CellKind.MISSING
+
 
 @dataclass
 class TableRowData:
@@ -298,6 +316,8 @@ class PackageSession:
     file_snapshots: dict[str, FileSnapshot] = field(default_factory=dict)
     project_path: Path | None = None
     enabled_paths: list[str] = field(default_factory=list)
+    missing_target_mapping: dict[str, str] = field(default_factory=dict)
+    pending_conflict_keys: set[tuple[str, str]] = field(default_factory=set)
 
 
 def cldr_categories_for_lang(lang: str) -> tuple[str, ...]:

@@ -174,6 +174,7 @@ def _serialize_project_payload(session: PackageSession, project_dir: Path | None
             "base_external_path": str(session.base_external_path) if session.base_external_path else None,
             "target_langs": list(session.target_langs),
             "files": files_meta,
+            "missing_target_mapping": dict(session.missing_target_mapping),
         },
         "snapshots": {
             "files": {
@@ -404,6 +405,7 @@ def apply_conflict_resolutions(
     """Apply user-chosen conflict resolutions onto a PackageSession."""
     row_map = {r.key_path: r for r in session.rows}
     for res in resolutions:
+        session.pending_conflict_keys.discard((res.key_path, res.lang))
         row_data = row_map.get(res.key_path)
         if row_data is None:
             continue
@@ -432,6 +434,7 @@ def prepare_disk_sync(session: PackageSession) -> SyncPreview:
     )
     fresh.project_id = session.project_id
     fresh.project_path = session.project_path
+    fresh.missing_target_mapping = dict(session.missing_target_mapping)
     report = _apply_saved_state_and_sync(
         fresh,
         saved_snapshots=session.file_snapshots,
@@ -452,6 +455,7 @@ def commit_sync_preview(session: PackageSession, preview: SyncPreview) -> None:
     session.file_diagnostics = fresh.file_diagnostics
     session.fatal_files_by_lang = fresh.fatal_files_by_lang
     session.file_snapshots = fresh.file_snapshots
+    session.pending_conflict_keys.clear()
 
 
 def synchronize_session_with_disk(session: PackageSession) -> SyncReport:
@@ -521,6 +525,9 @@ def load_project_file(
     )
     session.project_id = str(raw.get("project_id") or session.project_id)
     session.project_path = resolved_proj
+    raw_mapping = pkg_meta.get("missing_target_mapping")
+    if isinstance(raw_mapping, dict):
+        session.missing_target_mapping = {str(k): str(v) for k, v in raw_mapping.items()}
 
     drafts = raw.get("drafts", {})
     review_state = raw.get("review_state", {})

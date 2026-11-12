@@ -19,6 +19,7 @@ DiagnosticKind = Literal[
     "overwritten_key",
     "non_string",
 ]
+InsertionMode = Literal["flat", "nested", "mixed"]
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,8 @@ class ParsedLangDocument:
     overwrites: list[DiagnosticIssue] = field(default_factory=list)
     non_string_keys: list[DiagnosticIssue] = field(default_factory=list)
     raw_bytes: bytes = b""
+    _root_span: tuple[int, int] = (0, 0)
+    _root_pairs: list[_RawPair] = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -545,4 +548,354 @@ def parse_lang_bytes(raw_bytes: bytes, source_file: str = "") -> ParsedLangDocum
         overwrites=overwrites,
         non_string_keys=non_string_keys,
         raw_bytes=raw_bytes,
+        _root_span=root_span,
+        _root_pairs=pairs,
     )
+
+
+def _reject_non_rfc_constant(token: str) -> Any:
+    raise ValueError(f"Non-standard JSON constant '{token}' is not allowed.")
+
+
+def _find_object_node(
+    pairs: list[_RawPair],
+    root_span: tuple[int, int],
+    target_path: tuple[str, ...],
+) -> tuple[tuple[int, int], list[_RawPair]] | None:
+    if not target_path:
+        return root_span, pairs
+    curr_pairs = pairs
+    curr_span = root_span
+    idx = 0
+    while idx < len(target_path):
+        matched = False
+        for pair in reversed(curr_pairs):
+            if not pair.is_object:
+                continue
+            segs = tuple(pair.raw_key.split("."))
+            end_idx = idx + len(segs)
+            if end_idx <= len(target_path) and target_path[idx:end_idx] == segs:
+                curr_span = pair.value_span
+                curr_pairs = pair.children or []
+                idx = end_idx
+                matched = True
+                break
+        if not matched:
+            return None
+    return curr_span, curr_pairs
+
+
+def _collect_pair_paths(
+    pairs: list[_RawPair],
+    prefix: tuple[str, ...],
+    out_leaves: dict[str, tuple[list[_RawPair], _RawPair]],
+    out_parents: dict[int, tuple[list[_RawPair], _RawPair]],
+) -> None:
+    for pair in pairs:
+        segs = tuple(pair.raw_key.split("."))
+        if any(seg in _FORBIDDEN_SEGMENTS for seg in segs):
+            continue
+        full_parts = prefix + segs
+        if pair.is_object:
+            assert pair.children is not None
+            for child in pair.children:
+                out_parents[id(child)] = (pairs, pair)
+            _collect_pair_paths(pair.children, full_parts, out_leaves, out_parents)
+        else:
+            out_leaves[".".join(full_parts)] = (pairs, pair)
+
+
+def _collect_deletion_cuts(
+    pairs: list[_RawPair],
+    obj_span: tuple[int, int],
+    removed_ids: set[int],
+    cuts: list[tuple[int, int, bytes]],
+) -> None:
+    if not pairs:
+        return
+    if all(id(p) in removed_ids for p in pairs):
+        cuts.append((obj_span[0] + 1, obj_span[1] - 1, b""))
+        return
+
+    surviving_indices = [i for i, p in enumerate(pairs) if id(p) not in removed_ids]
+    last_surviving_idx = surviving_indices[-1]
+
+    idx = 0
+    while idx < len(pairs):
+        pair = pairs[idx]
+        if id(pair) not in removed_ids:
+            if pair.is_object and pair.children is not None:
+                _collect_deletion_cuts(pair.children, pair.value_span, removed_ids, cuts)
+            idx += 1
+            continue
+
+        if idx < last_surviving_idx:
+            # Remove run of removed items before the next surviving item
+            end_idx = idx
+            while end_idx + 1 < last_surviving_idx and id(pairs[end_idx + 1]) in removed_ids:
+                end_idx += 1
+            next_surviving = pairs[end_idx + 1]
+            cuts.append((pair.key_span[0], next_surviving.key_span[0], b""))
+            idx = end_idx + 1
+        else:
+            # Trailing removed items after last_surviving_idx
+            prev_pair = pairs[last_surviving_idx]
+            cuts.append((prev_pair.value_span[1], pairs[-1].value_span[1], b""))
+            break
+
+
+def _apply_byte_replacements(raw_bytes: bytes, replacements: list[tuple[int, int, bytes]]) -> bytes:
+    if not replacements:
+        return raw_bytes
+    ordered = sorted(replacements, key=lambda item: (item[0], item[1]), reverse=True)
+    buf = bytearray(raw_bytes)
+    for start, end, new_bytes in ordered:
+        buf[start:end] = new_bytes
+    return bytes(buf)
+
+
+def _format_nested_value(
+    parts: tuple[str, ...],
+    value: str,
+    style: FileStyle,
+    depth: int,
+) -> str:
+    val_lit = json.dumps(value, ensure_ascii=style.all_non_ascii_escaped)
+    key_lit = json.dumps(parts[0], ensure_ascii=style.all_non_ascii_escaped)
+    if len(parts) == 1:
+        return f"{key_lit}: {val_lit}"
+    inner_indent = style.indent * (depth + 1)
+    closing_indent = style.indent * depth
+    inner_pair = _format_nested_value(parts[1:], value, style, depth + 1)
+    return f"{key_lit}: {{{style.eol}{inner_indent}{inner_pair}{style.eol}{closing_indent}}}"
+
+
+def _detect_insertion_mode(doc: ParsedLangDocument) -> InsertionMode:
+    has_nested = any(pair.is_object for pair in doc._root_pairs)
+    has_dotted_root = any((not pair.is_object) and ("." in pair.raw_key) for pair in doc._root_pairs)
+    if not has_nested and has_dotted_root:
+        return "flat"
+    if has_nested and has_dotted_root:
+        return "mixed"
+    return "nested"
+
+
+def _splice_pair_insertion(
+    current_bytes: bytes,
+    pair_bytes: bytes,
+    style: FileStyle,
+    indent_str: str,
+    is_inline_obj: bool,
+    pos: int,
+    before: bool = False,
+) -> bytes:
+    if is_inline_obj:
+        ins = (pair_bytes + b", ") if before else (b", " + pair_bytes)
+    else:
+        sep = (f",{style.eol}{indent_str}").encode("utf-8")
+        ins = (pair_bytes + sep) if before else (sep + pair_bytes)
+    return current_bytes[:pos] + ins + current_bytes[pos:]
+
+
+def _deepest_existing_object(
+    doc: ParsedLangDocument,
+    parts: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[int, int], list[_RawPair]]:
+    for depth in range(len(parts) - 1, 0, -1):
+        prefix = parts[:depth]
+        found = _find_object_node(doc._root_pairs, doc._root_span, prefix)
+        if found is not None:
+            return prefix, found[0], found[1]
+    return (), doc._root_span, doc._root_pairs
+
+
+def _pair_order_bounds(
+    pair: _RawPair,
+    parent_prefix: tuple[str, ...],
+    base_rank: dict[str, int],
+) -> int | None:
+    prefix_str = ".".join((*parent_prefix, pair.raw_key)) if parent_prefix else pair.raw_key
+    if not pair.is_object:
+        return base_rank.get(prefix_str)
+    sub_prefix = f"{prefix_str}."
+    ranks = [rank for k, rank in base_rank.items() if k.startswith(sub_prefix)]
+    return min(ranks) if ranks else None
+
+
+def _insert_one_key(
+    current_bytes: bytes,
+    key_path: str,
+    value: str,
+    base_rank: dict[str, int],
+    fallback_style: FileStyle | None,
+) -> bytes:
+    doc = parse_lang_bytes(current_bytes)
+    if doc.fatal_error is not None:
+        raise ValueError(f"Cannot insert '{key_path}' into invalid JSON: {doc.fatal_error.message}")
+
+    style = doc.style
+    if not doc._root_pairs and fallback_style is not None:
+        style = fallback_style
+
+    mode = _detect_insertion_mode(doc)
+    parts = tuple(key_path.split("."))
+    parent_prefix, obj_span, siblings = _deepest_existing_object(doc, parts)
+
+    target_rank = base_rank.get(key_path)
+    after_pair: _RawPair | None = None
+    before_pair: _RawPair | None = None
+
+    def _find_neighbors(cands: list[_RawPair], p_prefix: tuple[str, ...]) -> tuple[_RawPair | None, _RawPair | None]:
+        aft: _RawPair | None = None
+        bef: _RawPair | None = None
+        if target_rank is not None:
+            for sib in cands:
+                sib_rank = _pair_order_bounds(sib, p_prefix, base_rank)
+                if sib_rank is not None:
+                    if sib_rank < target_rank:
+                        aft = sib
+                    elif sib_rank > target_rank and bef is None:
+                        bef = sib
+        return aft, bef
+
+    rel_parts: tuple[str, ...]
+    if mode == "flat":
+        parent_prefix = ()
+        obj_span = doc._root_span
+        siblings = doc._root_pairs
+        rel_parts = (key_path,)
+        after_pair, before_pair = _find_neighbors(siblings, parent_prefix)
+    elif mode == "mixed" and not parent_prefix:
+        after_pair, before_pair = _find_neighbors(siblings, ())
+        neighbor = after_pair or before_pair
+        if neighbor is not None and neighbor.is_object:
+            rel_parts = parts
+        else:
+            rel_parts = (key_path,)
+    else:
+        rel_parts = parts[len(parent_prefix) :]
+        after_pair, before_pair = _find_neighbors(siblings, parent_prefix)
+
+    depth = len(parent_prefix) + 1
+    indent_str = style.indent * depth
+    parent_indent = style.indent * (depth - 1)
+    is_inline_obj = b"\n" not in current_bytes[obj_span[0] : obj_span[1]] and len(siblings) > 0
+
+    pair_text = _format_nested_value(rel_parts, value, style, depth=depth)
+    pair_bytes = pair_text.encode("utf-8")
+
+    if not siblings:
+        body = f"{style.eol}{indent_str}{pair_text}{style.eol}{parent_indent}".encode("utf-8")
+        return current_bytes[: obj_span[0] + 1] + body + current_bytes[obj_span[1] - 1 :]
+
+    if after_pair is not None:
+        return _splice_pair_insertion(
+            current_bytes, pair_bytes, style, indent_str, is_inline_obj, after_pair.value_span[1], before=False
+        )
+    if before_pair is not None:
+        return _splice_pair_insertion(
+            current_bytes, pair_bytes, style, indent_str, is_inline_obj, before_pair.key_span[0], before=True
+        )
+    return _splice_pair_insertion(
+        current_bytes, pair_bytes, style, indent_str, is_inline_obj, siblings[-1].value_span[1], before=False
+    )
+
+
+def validate_written_payload(
+    original_doc: ParsedLangDocument,
+    candidate_bytes: bytes,
+    edits: dict[str, str],
+    deletions: set[str],
+) -> None:
+    """Strictly validate JSON syntax, Foundry expandObject safety, and diff integrity in memory."""
+    has_bom = candidate_bytes.startswith(codecs.BOM_UTF8)
+    text = candidate_bytes.decode("utf-8-sig" if has_bom else "utf-8")
+    json.loads(text, parse_constant=_reject_non_rfc_constant)
+
+    reparsed = parse_lang_bytes(candidate_bytes)
+    if reparsed.fatal_error is not None:
+        raise ValueError(f"Generated payload failed Foundry expandObject check: {reparsed.fatal_error.message}")
+    if len(reparsed.overwrites) > len(original_doc.overwrites):
+        raise ValueError("Generated payload introduced unexpected expandObject key overwrites.")
+
+    for key, expected_val in edits.items():
+        entry = reparsed.entries.get(key)
+        if entry is None or not entry.is_string or entry.value != expected_val:
+            raise ValueError(f"Payload verification failed for edited key '{key}'.")
+    for key in deletions:
+        if key in reparsed.entries:
+            raise ValueError(f"Payload verification failed: deleted key '{key}' still present.")
+
+
+def apply_surgical_edits(
+    raw_bytes: bytes,
+    edits: dict[str, str],
+    deletions: set[str],
+    base_order: list[str],
+    fallback_style: FileStyle | None = None,
+) -> bytes:
+    """Apply value edits, deletions (pruning empty parents), and relative insertions preserving style."""
+    orig_doc = parse_lang_bytes(raw_bytes)
+    if orig_doc.fatal_error is not None:
+        raise ValueError(f"Cannot edit malformed JSON file: {orig_doc.fatal_error.message}")
+
+    replacements: list[tuple[int, int, bytes]] = []
+    inserts: dict[str, str] = {}
+
+    for key, new_val in edits.items():
+        if key in deletions:
+            continue
+        existing = orig_doc.entries.get(key)
+        if existing is not None:
+            if not existing.is_string:
+                raise ValueError(f"Cannot overwrite non-string key '{key}'.")
+            if existing.value != new_val:
+                lit = json.dumps(new_val, ensure_ascii=orig_doc.style.all_non_ascii_escaped).encode("utf-8")
+                replacements.append((existing.value_span[0], existing.value_span[1], lit))
+        else:
+            inserts[key] = new_val
+
+    effective_deletions = {k for k in deletions if k in orig_doc.entries}
+    if not replacements and not effective_deletions and not inserts:
+        return raw_bytes
+
+    if effective_deletions:
+        leaf_map: dict[str, tuple[list[_RawPair], _RawPair]] = {}
+        parent_map: dict[int, tuple[list[_RawPair], _RawPair]] = {}
+        _collect_pair_paths(orig_doc._root_pairs, (), leaf_map, parent_map)
+        removed_ids: set[int] = set()
+        for key in effective_deletions:
+            pair_info = leaf_map.get(key)
+            if pair_info is None:
+                continue
+            siblings, node = pair_info
+            removed_ids.add(id(node))
+            curr_siblings = siblings
+            curr_node = node
+            while all(id(s) in removed_ids for s in curr_siblings):
+                parent_info = parent_map.get(id(curr_node))
+                if parent_info is None:
+                    break
+                curr_siblings, curr_node = parent_info
+                removed_ids.add(id(curr_node))
+
+        _collect_deletion_cuts(orig_doc._root_pairs, orig_doc._root_span, removed_ids, replacements)
+
+    result_bytes = _apply_byte_replacements(raw_bytes, replacements)
+
+    if inserts:
+        base_rank = {k: i for i, k in enumerate(base_order)}
+        ordered_inserts = [k for k in base_order if k in inserts] + [
+            k for k in inserts if k not in base_rank
+        ]
+        for key in ordered_inserts:
+            result_bytes = _insert_one_key(
+                result_bytes,
+                key_path=key,
+                value=inserts[key],
+                base_rank=base_rank,
+                fallback_style=fallback_style,
+            )
+
+    validate_written_payload(orig_doc, result_bytes, edits, effective_deletions)
+    return result_bytes

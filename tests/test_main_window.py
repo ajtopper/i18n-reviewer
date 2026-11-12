@@ -370,6 +370,83 @@ def test_ticket03_save_open_unsaved_star_recovery_watcher_conflict_and_stale_ins
     assert c2_reopened is not None and c2_reopened.local_value == "Dois crash recovery"
 
 
+def test_ticket04_publish_dialog_and_backup_dialog_flow(
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    from app.core.project_manager import ConflictResolution
+    from app.ui.backup_dialog import BackupDialog, PublishDialog, RestoreSelection
+    from app.ui.conflict_dialog import ConflictResolutionDialog
+
+    app_data = tmp_path / "appdata"
+    pkg = tmp_path / "ui-pub-mod"
+    _write_json(
+        pkg / "module.json",
+        {
+            "id": "ui-pub-mod",
+            "languages": [
+                {"lang": "en", "path": "lang/en.json"},
+                {"lang": "pt-BR", "path": "lang/pt-BR.json"},
+                {"lang": "es", "path": "lang/es.json"},
+            ],
+        },
+    )
+    _write_json(pkg / "lang/en.json", {"A": "One"})
+    _write_json(pkg / "lang/pt-BR.json", {"A": "Um v1"})
+    _write_json(pkg / "lang/es.json", {"A": "Uno v1"})
+
+    win = MainWindow(app_data_dir=app_data)
+    qtbot.addWidget(win)
+    win.open_package_manifest(pkg / "module.json")
+
+    assert win.proxy_model.setData(win.proxy_model.index(0, 2), "Um v2", Qt.ItemDataRole.EditRole) is True
+    assert win.proxy_model.setData(win.proxy_model.index(0, 3), "Uno v2", Qt.ItemDataRole.EditRole) is True
+
+    # Publica apenas pt-BR desmarcando es no PublishDialog
+    monkeypatch.setattr(PublishDialog, "exec", lambda self: PublishDialog.DialogCode.Accepted)
+    monkeypatch.setattr(
+        PublishDialog,
+        "selected_plans",
+        lambda self: [fp for fp in self.plan.file_plans if fp.lang == "pt-BR"],
+    )
+    win.publish_to_production()
+
+    assert json.loads((pkg / "lang/pt-BR.json").read_text(encoding="utf-8")) == {"A": "Um v2"}
+    assert json.loads((pkg / "lang/es.json").read_text(encoding="utf-8")) == {"A": "Uno v1"}
+    c_pt = win.table_model.get_cell(0, 2)
+    c_es = win.table_model.get_cell(0, 3)
+    assert c_pt is not None and c_pt.is_dirty is False
+    assert c_es is not None and c_es.is_dirty is True
+
+    # Novo rascunho em pt-BR + restauração sem descartar rascunhos abre ConflictResolutionDialog
+    assert win.proxy_model.setData(win.proxy_model.index(0, 2), "Um v3 draft", Qt.ItemDataRole.EditRole) is True
+    dlg = BackupDialog(win.session.project_id if win.session else "", app_data_dir=app_data, parent=win)
+    qtbot.addWidget(dlg)
+    assert dlg.batch_list.count() == 1
+    assert dlg.selected_batch() is not None
+    first_batch_id = dlg.selected_batch().batch_id  # type: ignore[union-attr]
+
+    monkeypatch.setattr(BackupDialog, "exec", lambda self: BackupDialog.DialogCode.Accepted)
+    monkeypatch.setattr(
+        BackupDialog,
+        "restore_choice",
+        lambda self: RestoreSelection(batch_id=first_batch_id, rel_paths=None, discard_local_drafts=False),
+    )
+    monkeypatch.setattr(ConflictResolutionDialog, "exec", lambda self: ConflictResolutionDialog.DialogCode.Accepted)
+    monkeypatch.setattr(
+        ConflictResolutionDialog,
+        "resolutions",
+        lambda self: [ConflictResolution(key_path="A", lang="pt-BR", choice="accept_disk", manual_value="Um v1")],
+    )
+    win.open_backup_dialog()
+    assert json.loads((pkg / "lang/pt-BR.json").read_text(encoding="utf-8")) == {"A": "Um v1"}
+    c_pt_after = win.table_model.get_cell(0, 2)
+    assert c_pt_after is not None and c_pt_after.local_value == "Um v1"
+    win.save_project(tmp_path / "ui-pub-mod.i18nproj")
+
+
+
 
 def test_ticket02_row_height_cap_and_10k_scale(qtbot: QtBot, tmp_path: Path) -> None:
     pkg = tmp_path / "scale-mod"
