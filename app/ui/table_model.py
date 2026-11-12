@@ -30,6 +30,8 @@ class TranslationTableModel(QAbstractTableModel):
         self.rows: list[TableRowData] = []
         self.base_lang: str = "en"
         self.target_langs: list[str] = []
+        self.missing_spell_langs: set[str] = set()
+        self.missing_spell_tooltips: dict[str, str] = {}
         self.undo_stack = undo_stack
 
     def set_session(self, session: PackageSession) -> None:
@@ -62,6 +64,11 @@ class TranslationTableModel(QAbstractTableModel):
         orientation: Qt.Orientation,
         role: int = Qt.ItemDataRole.DisplayRole,
     ) -> Any:
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.ToolTipRole:
+            idx = section - 2
+            if 0 <= idx < len(self.target_langs):
+                return self.missing_spell_tooltips.get(self.target_langs[idx])
+            return None
         if role != Qt.ItemDataRole.DisplayRole:
             return None
         if orientation == Qt.Orientation.Horizontal:
@@ -72,10 +79,13 @@ class TranslationTableModel(QAbstractTableModel):
             idx = section - 2
             if 0 <= idx < len(self.target_langs):
                 lang = self.target_langs[idx]
+                label = lang
                 if self.session and lang in self.session.lang_conditionals:
                     cond = ", ".join(self.session.lang_conditionals[lang])
-                    return f"{lang} [{cond}]"
-                return lang
+                    label = f"{lang} [{cond}]"
+                if lang in self.missing_spell_langs:
+                    label = f"{label} (sem ortografia)"
+                return label
             return ""
         return str(section + 1)
 

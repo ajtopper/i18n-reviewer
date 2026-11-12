@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 import hashlib
+import os
+from pathlib import Path
 import re
 from typing import Literal
 
@@ -140,6 +142,37 @@ class _IgnoreContext:
             ):
                 return item
         return None
+
+
+def default_app_data_dir() -> Path:
+    """Return user per-app configuration directory under %APPDATA% (or ~/.config fallback)."""
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / "i18n-reviewer"
+    return Path.home() / ".config" / "i18n-reviewer"
+
+
+def term_boundary_pattern(phrase: str, *, case_sensitive: bool = True) -> re.Pattern[str]:
+    """Compile a Unicode word-boundary regex for phrase matching or replacement."""
+    flags = 0 if case_sensitive else re.IGNORECASE
+    return re.compile(rf"(?<!\w){re.escape(phrase)}(?!\w)", flags)
+
+
+def build_ignored_map(
+    ignored_warnings: list[IgnoredWarning] | None,
+    key_path: str,
+    lang: str,
+    target_text: str | None,
+) -> dict[str, IgnoredWarning]:
+    """Index active IgnoredWarning rules matching (key_path, lang, current value hash)."""
+    if not ignored_warnings:
+        return {}
+    val_hash = compute_value_hash(target_text)
+    return {
+        iw.rule_id: iw
+        for iw in ignored_warnings
+        if iw.key_path == key_path and iw.lang == lang and iw.value_hash == val_hash
+    }
 
 
 def compute_value_hash(text: str | None) -> str:
@@ -422,6 +455,8 @@ def extract_protected_tokens(
 ) -> list[ProtectedToken]:
     """Extract protected spans in fixed cascade order without double-counting nested labels."""
     if not text:
+        return []
+    if not custom_enrichers and not any(ch in text for ch in ("{", "[", "@", "&", "<", ":")):
         return []
 
     length = len(text)

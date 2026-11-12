@@ -79,15 +79,17 @@ from app.core.glossary import (
     detect_base_glossary_matches,
     lint_translation_glossary,
     load_global_glossary,
+    mask_technical_spans,
     merge_glossaries,
     save_global_glossary,
 )
+from app.core.spell_service import SpellService
 from app.core.validator import (
     CustomEnricherRule,
-    ValidationIssue,
     compute_value_hash,
     inspect_base_defects,
     missing_tokens_for_translation,
+    term_boundary_pattern,
     validate_translation,
 )
 from app.ui.commands import (
@@ -346,6 +348,7 @@ class MainWindow(QMainWindow):
         self._validation_gen: int = 0
         self._active_validation_workers: int = 0
         self._global_glossary_cache: list[GlossaryEntry] = load_global_glossary(self.app_data_dir)
+        self.spell_service = SpellService(app_data_dir=self.app_data_dir)
         self._table_glossary_popup: object | None = None
         self._validation_signals = ValidationSignals(self)
         self._validation_signals.batch_ready.connect(self._on_validation_batch_ready)
@@ -926,6 +929,7 @@ class MainWindow(QMainWindow):
         self.undo_stack.clear()
         self.cell_delegate.invalidate_cache()
         self.table_model.set_session(session)
+        self._refresh_spell_header_statuses(session, open_dicts=False)
         self._update_window_title()
         self._watch_session_files(session)
         self.external_change_banner.setVisible(False)
@@ -1155,7 +1159,15 @@ class MainWindow(QMainWindow):
         cell = self.table_model.get_cell(source_index.row(), source_index.column())
         if row_data is None or cell is None:
             return
+        menu = self._build_cell_context_menu(row_data, cell, source_index.column())
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
+    def _build_cell_context_menu(
+        self,
+        row_data: TableRowData,
+        cell: CellData,
+        source_col: int,
+    ) -> QMenu:
         menu = QMenu(self)
         menu.addAction("Marcar como Revisado", self.mark_current_reviewed)
         menu.addAction("Marcar Revisado + Próxima (Ctrl+Enter)", self.review_and_advance)
@@ -1197,7 +1209,7 @@ class MainWindow(QMainWindow):
 
         # 3ª seção: glossário (aplicar tradução preferida / adicionar termo)
         if self.session is not None and cell.can_edit():
-            lang = self.session.target_langs[source_index.column() - 2]
+            lang = self.session.target_langs[source_col - 2]
             merged = self.merged_glossary()
             matches = detect_base_glossary_matches(
                 row_data.base_text,
@@ -1238,7 +1250,34 @@ class MainWindow(QMainWindow):
             act_add_gloss = menu.addAction("Adicionar termo ao glossário...")
             act_add_gloss.triggered.connect(_open_add_term)
 
-        menu.exec(self.table.viewport().mapToGlobal(pos))
+            # 4ª seção: sugestões ortográficas sob demanda + adicionar ao PWL global
+            if cell.active_spell_issues:
+                menu.addSeparator()
+                for s_issue in cell.active_spell_issues[:4]:
+                    if not s_issue.missing_tokens:
+                        continue
+                    bad_word = s_issue.missing_tokens[0]
+                    for sugg in self.spell_service.suggest(lang, bad_word, limit=4):
+                        act_fix = menu.addAction(f"Corrigir '{bad_word}' → '{sugg}'")
+
+                        def _make_fix(bw: str, rep: str) -> Callable[[bool], None]:
+                            def _handler(_checked: bool = False) -> None:
+                                self.replace_spell_word_for_current(bw, rep)
+
+                            return _handler
+
+                        act_fix.triggered.connect(_make_fix(bad_word, sugg))
+                    act_pwl = menu.addAction(f"Adicionar '{bad_word}' ao dicionário")
+
+                    def _make_pwl(bw: str) -> Callable[[bool], None]:
+                        def _handler(_checked: bool = False) -> None:
+                            self.add_personal_word_current(bw)
+
+                        return _handler
+
+                    act_pwl.triggered.connect(_make_pwl(bad_word))
+
+        return menu
 
     def _open_table_glossary_popup(self) -> None:
         """Open Ctrl+Space glossary popup directly over a selected table cell when no inline editor is active."""
@@ -1418,6 +1457,7 @@ class MainWindow(QMainWindow):
             custom_enrichers=list(session.custom_enrichers),
             ignored_warnings=list(session.ignored_warnings),
             glossary_entries=self.merged_glossary(),
+            spell_service=self.spell_service,
             signals=self._validation_signals,
         )
         QThreadPool.globalInstance().start(worker, 5)
@@ -1442,17 +1482,87 @@ class MainWindow(QMainWindow):
                     cell = row_data.cells.get(lang)
                     if cell is not None:
                         cell.glossary_issues = g_issues
+                for lang, s_issues in item.cell_spell_issues.items():
+                    cell = row_data.cells.get(lang)
+                    if cell is not None:
+                        cell.spell_issues = s_issues
         self.table.viewport().update()
         if self.proxy_model.status_filter in ("alerts", "glossary"):
             self.proxy_model.invalidateFilter()
+
+    def _refresh_spell_header_statuses(
+        self,
+        session: PackageSession,
+        *,
+        open_dicts: bool = True,
+    ) -> None:
+        missing_langs: set[str] = set()
+        missing_tips: dict[str, str] = {}
+        for lang in session.target_langs:
+            st = self.spell_service.status_for(lang, open_dict=open_dicts)
+            if not st.available:
+                missing_langs.add(lang)
+                missing_tips[lang] = st.message
+        if (
+            missing_langs != self.table_model.missing_spell_langs
+            or missing_tips != self.table_model.missing_spell_tooltips
+        ):
+            self.table_model.missing_spell_langs = missing_langs
+            self.table_model.missing_spell_tooltips = missing_tips
+            self.table_model.headerDataChanged.emit(
+                Qt.Orientation.Horizontal,
+                2,
+                max(2, 1 + len(session.target_langs)),
+            )
 
     def _on_validation_finished(self, gen: int) -> None:
         if gen != self._validation_gen:
             return
         self._active_validation_workers = max(0, self._active_validation_workers - 1)
         if self._active_validation_workers == 0 and self.session is not None:
+            self._refresh_spell_header_statuses(self.session, open_dicts=True)
             self._refresh_statusbar(self.session)
-            self._on_current_changed(self.table.currentIndex(), QModelIndex())
+            self._sync_inspector_to_current(include_spell_suggestions=False)
+
+    def _evaluate_cell_all(
+        self,
+        row_data: TableRowData,
+        cell: CellData,
+        lang: str,
+        target_text: str | None,
+        *,
+        ignore_empty: bool,
+        glossary: list[GlossaryEntry],
+    ) -> None:
+        if self.session is None:
+            return
+        cell.validation_issues = validate_translation(
+            row_data.key_path,
+            lang,
+            row_data.base_text,
+            target_text,
+            custom_enrichers=self.session.custom_enrichers,
+            ignored_warnings=self.session.ignored_warnings,
+            ignore_empty=ignore_empty,
+        )
+        cell.glossary_issues = lint_translation_glossary(
+            row_data.key_path,
+            lang,
+            row_data.base_text,
+            target_text,
+            glossary,
+            custom_enrichers=self.session.custom_enrichers,
+            ignored_warnings=self.session.ignored_warnings,
+        )
+        cell.spell_issues = self.spell_service.lint_cell_spelling(
+            row_data.key_path,
+            lang,
+            row_data.base_text,
+            target_text,
+            glossary_entries=glossary,
+            custom_enrichers=self.session.custom_enrichers,
+            ignored_warnings=self.session.ignored_warnings,
+        )
 
     def _validate_row_sync(self, source_row: int) -> None:
         if self.session is None or not (0 <= source_row < len(self.session.rows)):
@@ -1464,23 +1574,13 @@ class MainWindow(QMainWindow):
             custom_enrichers=self.session.custom_enrichers,
         )
         for lang, cell in row_data.cells.items():
-            cell.validation_issues = validate_translation(
-                row_data.key_path,
+            self._evaluate_cell_all(
+                row_data,
+                cell,
                 lang,
-                row_data.base_text,
                 cell.local_value,
-                custom_enrichers=self.session.custom_enrichers,
-                ignored_warnings=self.session.ignored_warnings,
                 ignore_empty=not cell.is_dirty,
-            )
-            cell.glossary_issues = lint_translation_glossary(
-                row_data.key_path,
-                lang,
-                row_data.base_text,
-                cell.local_value,
-                glossary,
-                custom_enrichers=self.session.custom_enrichers,
-                ignored_warnings=self.session.ignored_warnings,
+                glossary=glossary,
             )
         if self.proxy_model.status_filter in ("alerts", "glossary"):
             self.proxy_model.invalidateFilter()
@@ -1495,26 +1595,65 @@ class MainWindow(QMainWindow):
         if row_data is None or cell is not target_cell:
             return
         lang = self.session.target_langs[pos[1] - 2]
-        cell.validation_issues = validate_translation(
-            row_data.key_path,
+        self._evaluate_cell_all(
+            row_data,
+            cell,
             lang,
-            row_data.base_text,
             draft_text,
-            custom_enrichers=self.session.custom_enrichers,
-            ignored_warnings=self.session.ignored_warnings,
             ignore_empty=(draft_text == cell.prod_value and not cell.is_dirty),
-        )
-        cell.glossary_issues = lint_translation_glossary(
-            row_data.key_path,
-            lang,
-            row_data.base_text,
-            draft_text,
-            self.merged_glossary(),
-            custom_enrichers=self.session.custom_enrichers,
-            ignored_warnings=self.session.ignored_warnings,
+            glossary=self.merged_glossary(),
         )
         self.table.viewport().update()
-        self._refresh_inspector_diagnostics(row_data, cell, lang, live_text=draft_text)
+        self._refresh_inspector_diagnostics(
+            row_data,
+            cell,
+            lang,
+            live_text=draft_text,
+            include_spell_suggestions=False,
+        )
+
+    def replace_spell_word_for_current(self, bad_word: str, replacement: str) -> bool:
+        """Replace a misspelled word in unmasked prose of the current cell via QUndoStack."""
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2 or self.session is None:
+            return False
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        if row_data is None or cell is None or not cell.can_edit() or not cell.local_value:
+            return False
+        masked = mask_technical_spans(cell.local_value, custom_enrichers=self.session.custom_enrichers)
+        match = term_boundary_pattern(bad_word).search(masked)
+        if match is None:
+            return False
+        orig = cell.local_value
+        new_val = orig[: match.start()] + replacement + orig[match.end() :]
+        if not cell.will_apply_edit(new_val):
+            return False
+        self.undo_stack.push(
+            EditCellCommand(
+                cell=cell,
+                base_text=row_data.base_text,
+                new_value=new_val,
+                row=row,
+                col=col,
+                notify=self.table_model.notify_cell_changed,
+            )
+        )
+        return True
+
+    def add_personal_word_current(self, word: str) -> bool:
+        """Add word to global PWL for the current column's language and revalidate session cells."""
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2 or self.session is None:
+            return False
+        row, col = pos
+        lang = self.session.target_langs[col - 2]
+        if not self.spell_service.add_personal(lang, word):
+            return False
+        self._validate_row_sync(row)
+        self.revalidate_session()
+        return True
 
     def insert_missing_token_for_current(self, token: str) -> bool:
         """Insert a missing protected token at the active cursor position via QUndoStack."""
@@ -1629,12 +1768,21 @@ class MainWindow(QMainWindow):
             self._update_window_title()
             write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
             self._refresh_statusbar(self.session)
-        self._on_current_changed(self.table.currentIndex(), QModelIndex())
+        self._sync_inspector_to_current(include_spell_suggestions=False)
 
     def _on_current_changed(self, current: QModelIndex, _prev: QModelIndex) -> None:
-        if self.session is None or not current.isValid():
+        self._sync_inspector_to_current(current=current, include_spell_suggestions=True)
+
+    def _sync_inspector_to_current(
+        self,
+        current: QModelIndex | None = None,
+        *,
+        include_spell_suggestions: bool = True,
+    ) -> None:
+        target_idx = current if current is not None else self.table.currentIndex()
+        if self.session is None or not target_idx.isValid():
             return
-        src = self.proxy_model.mapToSource(current)
+        src = self.proxy_model.mapToSource(target_idx)
         if not src.isValid():
             return
         row_data = self.table_model.get_row(src.row())
@@ -1676,7 +1824,12 @@ class MainWindow(QMainWindow):
         else:
             self.inspector_stale_label.setVisible(False)
 
-        self._refresh_inspector_diagnostics(row_data, cell, lang)
+        self._refresh_inspector_diagnostics(
+            row_data,
+            cell,
+            lang,
+            include_spell_suggestions=include_spell_suggestions,
+        )
 
     def _refresh_inspector_diagnostics(
         self,
@@ -1685,10 +1838,14 @@ class MainWindow(QMainWindow):
         lang: str,
         *,
         live_text: str | None = None,
+        include_spell_suggestions: bool = True,
     ) -> None:
         if self.session is None:
             return
         diags: list[str] = []
+        spell_status = self.spell_service.status_for(lang)
+        if not spell_status.available:
+            diags.append(f"[ortografia] {spell_status.message}")
         files_to_check = [cell.source_file] if cell.source_file else []
         for fatal_path in self.session.fatal_files_by_lang.get(lang, []):
             if fatal_path not in files_to_check:
@@ -1705,7 +1862,17 @@ class MainWindow(QMainWindow):
         for v_iss in cell.all_validation_issues:
             tag = f"{v_iss.severity} (ignorado)" if v_iss.is_ignored else v_iss.severity
             reason_sfx = f" — {v_iss.ignored_reason}" if v_iss.ignored_reason else ""
-            diags.append(f"[{tag}:{v_iss.rule_id}] {v_iss.message}{reason_sfx}")
+            sugg_sfx = ""
+            if (
+                include_spell_suggestions
+                and v_iss.rule_id.startswith("spell:")
+                and not v_iss.is_ignored
+                and v_iss.missing_tokens
+            ):
+                suggs = self.spell_service.suggest(lang, v_iss.missing_tokens[0], limit=3)
+                if suggs:
+                    sugg_sfx = f" (Sugestões: {', '.join(suggs)})"
+            diags.append(f"[{tag}:{v_iss.rule_id}] {v_iss.message}{reason_sfx}{sugg_sfx}")
 
         self.inspector_diag_label.setText("\n".join(diags) if diags else "Diagnóstico do arquivo: OK")
         self._clear_inspector_dynamic_actions()

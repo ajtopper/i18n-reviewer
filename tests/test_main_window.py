@@ -748,4 +748,90 @@ def test_ticket06_glossary_dialog_filter_ctrl_space_and_context_menu(
     win.save_project(tmp_path / "gloss-ui.i18nproj")
 
 
+def test_ticket07_spellcheck_batch_on_demand_suggest_missing_lang_and_pwl(
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    app_data = tmp_path / "appdata"
+    pkg = tmp_path / "spell-ui-mod"
+    _write_json(
+        pkg / "module.json",
+        {
+            "id": "spell-ui-mod",
+            "languages": [
+                {"lang": "en", "path": "lang/en.json"},
+                {"lang": "pt-BR", "path": "lang/pt-BR.json"},
+                {"lang": "eo", "path": "lang/eo.json"},
+            ],
+        },
+    )
+    _write_json(pkg / "lang/en.json", {"S1": "Spell failed", "S2": "Custom term", "S3": "Another custom term"})
+    _write_json(pkg / "lang/pt-BR.json", {"S1": "O feitisso falhou", "S2": "Palavra Zorgxp", "S3": "Mesma Zorgxp aqui"})
+    _write_json(pkg / "lang/eo.json", {"S1": "Xyzqwerty", "S2": "Abcdefg", "S3": "Hijklm"})
+
+    win = MainWindow(app_data_dir=app_data)
+    qtbot.addWidget(win)
+
+    suggest_calls: list[str] = []
+    orig_suggest = win.spell_service.suggest
+
+    def _spy_suggest(lang: str, word: str, limit: int = 6) -> list[str]:
+        suggest_calls.append(f"{lang}:{word}")
+        return orig_suggest(lang, word, limit=limit)
+
+    monkeypatch.setattr(win.spell_service, "suggest", _spy_suggest)  # type: ignore[attr-defined]
+    win.open_package_manifest(pkg / "module.json")
+    qtbot.waitUntil(lambda: not win.validation_in_progress, timeout=4000)
+
+    # Batch nunca chama suggest()
+    assert suggest_calls == []
+
+    # pt-BR detecta erros de ortografia; eo sem dicionário fica desligado + aviso no cabeçalho/Inspector
+    c_s1_pt = win.table_model.get_cell(0, 2)
+    c_s1_eo = win.table_model.get_cell(0, 3)
+    c_s2_pt = win.table_model.get_cell(1, 2)
+    c_s3_pt = win.table_model.get_cell(2, 2)
+    assert c_s1_pt is not None and any(i.rule_id == "spell:feitisso" for i in c_s1_pt.active_spell_issues)
+    assert c_s1_pt.validation_severity == "warning"
+    assert c_s1_eo is not None and c_s1_eo.active_spell_issues == []
+
+    hdr_eo = str(win.table_model.headerData(3, Qt.Orientation.Horizontal))
+    assert "sem ortografia" in hdr_eo.lower()
+    win.table.setCurrentIndex(win.proxy_model.index(0, 3))
+    assert "hunspell" in win.inspector_diag_label.text().lower()
+
+    # Menu de contexto (4ª seção) calcula suggest() sob demanda e permite corrigir / adicionar ao dicionário
+    win.table.setCurrentIndex(win.proxy_model.index(0, 2))
+    assert any("feitisso" in s for s in suggest_calls)
+    r0 = win.table_model.get_row(0)
+    assert r0 is not None
+    ctx_menu = win._build_cell_context_menu(r0, c_s1_pt, 2)
+    action_texts = [a.text() for a in ctx_menu.actions() if not a.isSeparator()]
+    assert any("Corrigir 'feitisso'" in t for t in action_texts)
+    assert "Adicionar 'feitisso' ao dicionário" in action_texts
+
+    # Substituição preserva spans técnicos caso palavra ocorra em URL/placeholder anterior
+    assert win.proxy_model.setData(win.proxy_model.index(0, 2), "Veja {feitisso} o feitisso falhou", Qt.ItemDataRole.EditRole) is True
+    assert win.replace_spell_word_for_current("feitisso", "feitiço") is True
+    assert c_s1_pt.local_value == "Veja {feitisso} o feitiço falhou"
+
+    win.undo_stack.undo()
+    assert c_s1_pt.local_value == "Veja {feitisso} o feitisso falhou"
+    win.undo_stack.undo()
+    assert c_s1_pt.local_value == "O feitisso falhou"
+
+    # Adicionar ao dicionário PWL limpa TODAS as células afetadas em pt-BR
+    assert c_s2_pt is not None and any(i.rule_id == "spell:Zorgxp" for i in c_s2_pt.active_spell_issues)
+    assert c_s3_pt is not None and any(i.rule_id == "spell:Zorgxp" for i in c_s3_pt.active_spell_issues)
+    win.table.setCurrentIndex(win.proxy_model.index(1, 2))
+    assert win.add_personal_word_current("Zorgxp") is True
+    qtbot.waitUntil(lambda: not win.validation_in_progress, timeout=4000)
+    assert c_s2_pt.active_spell_issues == []
+    assert c_s3_pt.active_spell_issues == []
+
+    win.save_project(tmp_path / "spell-ui.i18nproj")
+
+
+
 

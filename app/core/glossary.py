@@ -13,8 +13,10 @@ from app.core.validator import (
     CustomEnricherRule,
     IgnoredWarning,
     ValidationIssue,
-    compute_value_hash,
+    build_ignored_map,
+    default_app_data_dir,
     extract_protected_tokens,
+    term_boundary_pattern,
 )
 
 
@@ -41,16 +43,9 @@ class GlossaryEntry:
         return opts[0] if opts else None
 
 
-def _default_app_data_dir() -> Path:
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        return Path(appdata) / "i18n-reviewer"
-    return Path.home() / ".config" / "i18n-reviewer"
-
-
 def global_glossary_path(app_data_dir: Path | None = None) -> Path:
     """Return path to the user-wide global glossary JSON under %APPDATA%."""
-    base = app_data_dir or _default_app_data_dir()
+    base = app_data_dir or default_app_data_dir()
     return base / "glossary.json"
 
 
@@ -280,9 +275,26 @@ def mask_technical_spans(
     return "".join(chars)
 
 
-def _term_pattern(phrase: str, *, case_sensitive: bool) -> re.Pattern[str]:
-    flags = 0 if case_sensitive else re.IGNORECASE
-    return re.compile(rf"(?<!\w){re.escape(phrase)}(?!\w)", flags)
+def mask_glossary_phrases(
+    masked_text: str,
+    lang: str,
+    entries: list[GlossaryEntry],
+) -> str:
+    """Replace active glossary phrases (source and target accepted variants) with spaces."""
+    if not masked_text or not entries:
+        return masked_text
+    chars = list(masked_text)
+    for entry in entries:
+        phrases = [entry.term, *entry.source_variants, *entry.accepted_translations(lang)]
+        for phrase in phrases:
+            clean = phrase.strip()
+            if not clean:
+                continue
+            pat = term_boundary_pattern(clean, case_sensitive=entry.case_sensitive)
+            for m in pat.finditer(masked_text):
+                for idx in range(m.start(), m.end()):
+                    chars[idx] = " "
+    return "".join(chars)
 
 
 def detect_base_glossary_matches(
@@ -305,7 +317,7 @@ def detect_base_glossary_matches(
             if not clean or clean in seen_phrases:
                 continue
             seen_phrases.add(clean)
-            for m in _term_pattern(clean, case_sensitive=entry.case_sensitive).finditer(masked):
+            for m in term_boundary_pattern(clean, case_sensitive=entry.case_sensitive).finditer(masked):
                 s, e = m.span()
                 candidates.append((-(e - s), s, entry_idx, entry))
 
@@ -347,12 +359,7 @@ def lint_translation_glossary(
         return []
 
     masked_target = mask_technical_spans(target_text, custom_enrichers=custom_enrichers)
-    val_hash = compute_value_hash(target_text)
-    ignored_map = {
-        iw.rule_id: iw
-        for iw in (ignored_warnings or [])
-        if iw.key_path == key_path and iw.lang == lang and iw.value_hash == val_hash
-    }
+    ignored_map = build_ignored_map(ignored_warnings, key_path, lang, target_text)
     issues: list[ValidationIssue] = []
 
     for entry in matched:
@@ -361,7 +368,8 @@ def lint_translation_glossary(
             continue
 
         found = any(
-            _term_pattern(opt, case_sensitive=entry.case_sensitive).search(masked_target) is not None
+            term_boundary_pattern(opt, case_sensitive=entry.case_sensitive).search(masked_target)
+            is not None
             for opt in accepted
         )
         if found:
