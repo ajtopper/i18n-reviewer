@@ -1,8 +1,8 @@
-# 08: Empacotamento Windows (spec/build.spec), enxugamento de DLLs, licenças e --self-test
+# 09: Empacotamento Windows (spec/build.spec), enxugamento de DLLs, licenças e --self-test
 
 **What to build:** Configuração final de empacotamento e distribuição do aplicativo para Windows 64-bit com PyInstaller (`--onedir --windowed`), enxugando módulos Qt ociosos e as ~38 DLLs MSYS2/nuspell não usadas do `pyenchant`, empacotando os dicionários Hunspell (`en_US`, `pt_BR`, `es_ES`, `fr_FR`, `de_DE`) e a pasta `licenses/`, e adicionando o modo `--self-test` ao executável congelado para validar automaticamente que o build abre o Qt offscreen e carrega os 4 dicionários com palavra-sentinela sem depender do Python instalado.
 
-**Blocked by:** 04: Writer cirúrgico por spans, backups agrupados e pipeline Enviar para Produção / Restaurar, 07: Corretor ortográfico Hunspell (pyenchant), dicionário pessoal e contorno não-ASCII no Windows
+**Blocked by:** 04: Writer cirúrgico por spans, backups agrupados e pipeline Enviar para Produção / Restaurar, 07: Corretor ortográfico Hunspell (pyenchant), dicionário pessoal e contorno não-ASCII no Windows, 08: Tradução completa da interface e mensagens para Inglês Internacional
 
 **Status:** ready-for-agent
 
