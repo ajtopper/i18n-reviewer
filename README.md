@@ -145,6 +145,26 @@ Useful flags:
 .\dist\i18n-reviewer\i18n-reviewer.exe --self-test
 ```
 
+### Releasing on GitHub (Standard Post-Merge Flow)
+
+GitHub Actions workflows under `.github/workflows/` automate validation and Windows releases:
+
+1. **Continuous Integration ([ci.yml](.github/workflows/ci.yml)):** Runs `mypy app` and `pytest -v` on every pull request and push to `main`.
+2. **Automated Windows Release ([release.yml](.github/workflows/release.yml)):** After merging to `main`, create and push a semantic version tag (or trigger the **Release Windows Build** workflow manually from GitHub Actions):
+
+```powershell
+git checkout main
+git pull
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow runs type checks and tests, builds the `--onedir` bundle + Inno Setup installer via `scripts\package_windows.ps1 -BuildInstaller`, verifies `--self-test`, generates `SHA256SUMS.txt`, and publishes a GitHub Release with:
+
+- `i18n-reviewer-<Version>-setup-win64.exe` (Windows installer)
+- `i18n-reviewer-<Version>-win64.zip` (portable archive containing `i18n-reviewer.exe`, DLLs, dictionaries, and `licenses/`)
+- `SHA256SUMS.txt` (SHA-256 checksums for both downloads)
+
 ## License & Third-Party Notices
 
 - **Application Code (`MIT`):** The **i18n Reviewer** source code in this repository is licensed under the [MIT License](LICENSE).
