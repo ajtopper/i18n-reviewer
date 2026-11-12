@@ -93,7 +93,9 @@ from app.core.validator import (
     validate_translation,
 )
 from app.ui.commands import (
+    EditBaseCellCommand,
     EditCellCommand,
+    RevertBaseCellCommand,
     RevertCellCommand,
     ReviewCellCommand,
     ToggleOrphanDeletionCommand,
@@ -212,7 +214,7 @@ def _clear_layout_widgets(layout: QLayout) -> None:
 
 
 class ExpandedEditorDialog(QDialog):
-    """Side-by-side Base x Translation editor for long or multi-line strings (Shift+F2)."""
+    """Side-by-side Base x Translation editor (or editable Base editor) for Shift+F2."""
 
     def __init__(
         self,
@@ -223,18 +225,22 @@ class ExpandedEditorDialog(QDialog):
         parent: QWidget | None = None,
         custom_enrichers: list[CustomEnricherRule] | None = None,
         glossary_entries: list[GlossaryEntry] | None = None,
+        *,
+        editable_base: bool = False,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Expanded Editor — {key_path} ({lang})")
-        self.resize(820, 460)
+        mode_title = f"{lang} (Base)" if editable_base else lang
+        self.setWindowTitle(f"Expanded Editor — {key_path} ({mode_title})")
+        self.resize(820 if not editable_base else 680, 460)
         self._base_text = base_text
         self._key_path = key_path
         self._lang = lang
+        self._editable_base = editable_base
         self._custom_enrichers = list(custom_enrichers or [])
         self._glossary_entries = list(glossary_entries or [])
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"Key: {key_path} · Language: {lang}"))
+        layout.addWidget(QLabel(f"Key: {key_path} · Language: {mode_title}"))
 
         self.token_strip = QWidget()
         self.token_strip_layout = QHBoxLayout(self.token_strip)
@@ -242,32 +248,36 @@ class ExpandedEditorDialog(QDialog):
         layout.addWidget(self.token_strip)
 
         cols = QHBoxLayout()
-        left_box = QVBoxLayout()
-        left_box.addWidget(QLabel("Reference (Base):"))
         self.base_view = QPlainTextEdit()
         self.base_view.setReadOnly(True)
         self.base_view.setPlainText(base_text)
         TokenHighlighter(self.base_view.document(), custom_enrichers=self._custom_enrichers)
-        left_box.addWidget(self.base_view)
+        if not editable_base:
+            left_box = QVBoxLayout()
+            left_box.addWidget(QLabel("Reference (Base):"))
+            left_box.addWidget(self.base_view)
+            cols.addLayout(left_box, 1)
 
         right_box = QVBoxLayout()
-        right_box.addWidget(QLabel(f"Translation ({lang}):"))
-        self.target_edit = QPlainTextEdit()
-        self.target_edit.setPlainText(target_text)
-        TokenHighlighter(self.target_edit.document(), custom_enrichers=self._custom_enrichers)
-        attach_ctrl_space_glossary_popup(
-            self.target_edit,
-            context_getter=lambda: GlossaryCellContext(
-                base_text=self._base_text,
-                lang=self._lang,
-                entries=self._glossary_entries,
-            ),
-            custom_enrichers_getter=lambda: self._custom_enrichers,
+        right_box.addWidget(
+            QLabel(f"Base ({lang}) — Source:" if editable_base else f"Translation ({lang}):")
         )
+        self.target_edit = QPlainTextEdit()
+        self.target_edit.setPlainText(base_text if editable_base else target_text)
+        TokenHighlighter(self.target_edit.document(), custom_enrichers=self._custom_enrichers)
+        if not editable_base:
+            attach_ctrl_space_glossary_popup(
+                self.target_edit,
+                context_getter=lambda: GlossaryCellContext(
+                    base_text=self._base_text,
+                    lang=self._lang,
+                    entries=self._glossary_entries,
+                ),
+                custom_enrichers_getter=lambda: self._custom_enrichers,
+            )
         self.target_edit.textChanged.connect(self._refresh_missing_strip)
         right_box.addWidget(self.target_edit)
 
-        cols.addLayout(left_box, 1)
         cols.addLayout(right_box, 1)
         layout.addLayout(cols, 1)
 
@@ -293,6 +303,20 @@ class ExpandedEditorDialog(QDialog):
     def _refresh_missing_strip(self) -> None:
         _clear_layout_widgets(self.token_strip_layout)
         curr_text = self.target_edit.toPlainText()
+        if self._editable_base:
+            self.token_strip.setVisible(False)
+            issues = inspect_base_defects(curr_text, custom_enrichers=self._custom_enrichers)
+            if issues:
+                self.live_alert_label.setText(
+                    "Base notes: " + " | ".join(f"[{i.severity}] {i.message}" for i in issues)
+                )
+                self.live_alert_label.setStyleSheet("color: #1d4ed8;")
+            else:
+                self.live_alert_label.setText("No base issues.")
+                self.live_alert_label.setStyleSheet("color: #15803d;")
+            return
+
+        self.token_strip.setVisible(True)
         missing = missing_tokens_for_translation(
             self._base_text,
             curr_text,
@@ -706,6 +730,7 @@ class MainWindow(QMainWindow):
                 session.pending_conflict_keys.clear()
                 self._project_unsaved = True
                 self.table_model.set_session(session)
+                self._start_background_validation(session)
                 self._refresh_statusbar(session)
                 self._update_window_title()
             else:
@@ -997,7 +1022,7 @@ class MainWindow(QMainWindow):
         )
         dirty_count = sum(
             1 for r in session.rows for c in r.cells.values() if c.is_dirty
-        )
+        ) + sum(1 for r in session.rows if r.base_cell is not None and r.base_cell.is_dirty)
         missing_count = sum(
             1 for r in session.rows for c in r.cells.values() if c.is_missing
         )
@@ -1077,12 +1102,17 @@ class MainWindow(QMainWindow):
 
     def revert_current_cell(self) -> None:
         pos = self._current_source_pos()
-        if pos is None or pos[1] < 2:
+        if pos is None or pos[1] < 1:
             return
         row, col = pos
         row_data = self.table_model.get_row(row)
         cell = self.table_model.get_cell(row, col)
         if row_data is None or cell is None or not cell.is_dirty:
+            return
+        if col == 1:
+            self.undo_stack.push(
+                RevertBaseCellCommand(row_data, row, col, self.table_model.notify_row_changed)
+            )
             return
         self.undo_stack.push(
             RevertCellCommand(cell, row_data.base_text, row, col, self.table_model.notify_cell_changed)
@@ -1112,13 +1142,38 @@ class MainWindow(QMainWindow):
 
     def open_expanded_editor(self) -> None:
         pos = self._current_source_pos()
-        if pos is None or pos[1] < 2 or self.session is None:
+        if pos is None or pos[1] < 1 or self.session is None:
             return
         row, col = pos
         row_data = self.table_model.get_row(row)
         cell = self.table_model.get_cell(row, col)
         if row_data is None or cell is None or not cell.can_edit():
             return
+        if col == 1:
+            dlg = ExpandedEditorDialog(
+                cell.local_value or "",
+                cell.local_value or "",
+                row_data.key_path,
+                self.session.base_lang,
+                self,
+                custom_enrichers=self.session.custom_enrichers,
+                glossary_entries=self.merged_glossary(),
+                editable_base=True,
+            )
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                new_val = dlg.edited_text()
+                if cell.will_apply_edit(new_val):
+                    self.undo_stack.push(
+                        EditBaseCellCommand(
+                            row_data=row_data,
+                            new_value=new_val,
+                            row=row,
+                            col=col,
+                            notify_row=self.table_model.notify_row_changed,
+                        )
+                    )
+            return
+
         lang = self.session.target_langs[col - 2]
         dlg = ExpandedEditorDialog(
             row_data.base_text or "",
@@ -1153,7 +1208,7 @@ class MainWindow(QMainWindow):
             return
         self.table.setCurrentIndex(proxy_index)
         source_index = self.proxy_model.mapToSource(proxy_index)
-        if not source_index.isValid() or source_index.column() < 2:
+        if not source_index.isValid() or source_index.column() < 1:
             return
         row_data = self.table_model.get_row(source_index.row())
         cell = self.table_model.get_cell(source_index.row(), source_index.column())
@@ -1169,6 +1224,12 @@ class MainWindow(QMainWindow):
         source_col: int,
     ) -> QMenu:
         menu = QMenu(self)
+        if cell.is_base_cell:
+            if cell.can_edit():
+                menu.addAction("Expanded Editor (Shift+F2)...", self.open_expanded_editor)
+            if cell.is_dirty:
+                menu.addAction("Revert to production", self.revert_current_cell)
+            return menu
         menu.addAction("Mark as Reviewed", self.mark_current_reviewed)
         menu.addAction("Mark Reviewed + Next (Ctrl+Enter)", self.review_and_advance)
         menu.addAction("Expanded Editor (Shift+F2)...", self.open_expanded_editor)
@@ -1588,11 +1649,20 @@ class MainWindow(QMainWindow):
     def _on_inline_text_changed(self, target_cell: CellData, draft_text: str) -> None:
         """Revalidate an actively edited inline cell synchronously per keystroke."""
         pos = self._current_source_pos()
-        if pos is None or pos[1] < 2 or self.session is None:
+        if pos is None or pos[1] < 1 or self.session is None:
             return
         row_data = self.table_model.get_row(pos[0])
         cell = self.table_model.get_cell(pos[0], pos[1])
         if row_data is None or cell is not target_cell:
+            return
+        if pos[1] == 1:
+            row_data.base_issues = inspect_base_defects(
+                draft_text,
+                custom_enrichers=self.session.custom_enrichers,
+            )
+            self.table.viewport().update()
+            base_diags = self._collect_base_diagnostics(row_data)
+            self.inspector_diag_label.setText("\n".join(base_diags) if base_diags else "")
             return
         lang = self.session.target_langs[pos[1] - 2]
         self._evaluate_cell_all(
@@ -1758,6 +1828,56 @@ class MainWindow(QMainWindow):
         self._start_background_validation(self.session)
         return True
 
+    def _format_base_state_label(self, row_data: TableRowData) -> str:
+        if self.session is not None:
+            if self.session.base_external_path is not None:
+                return "State: External reference (Read-only)"
+            is_http_only = any(
+                e.lang == self.session.base_lang and e.is_http
+                for e in self.session.manifest.entries
+            ) and not any(
+                e.lang == self.session.base_lang and e.editable
+                for e in self.session.manifest.entries
+            )
+            if is_http_only:
+                return "State: Remote HTTP reference (Read-only)"
+        base_cell = row_data.base_cell
+        if base_cell is None:
+            return "State: Base · Read-only"
+        if base_cell.can_edit():
+            kind_sfx = " (empty)" if base_cell.kind == CellKind.EMPTY else ""
+            dirty_str = "Yes" if base_cell.is_dirty else "No"
+            return f"State: Base{kind_sfx} · Editable · Dirty: {dirty_str}"
+        kind_label = {
+            CellKind.NON_STRING: "non-string",
+            CellKind.STRUCTURAL_CONFLICT: "structural conflict",
+            CellKind.MISSING: "missing",
+        }.get(base_cell.kind, "read-only")
+        return f"State: Base ({kind_label}) · Read-only"
+
+    def _collect_base_diagnostics(self, row_data: TableRowData) -> list[str]:
+        if self.session is None:
+            return []
+        diags: list[str] = []
+        files_to_check = [row_data.base_source_file] if row_data.base_source_file else []
+        for fatal_path in self.session.fatal_files_by_lang.get(self.session.base_lang, []):
+            if fatal_path not in files_to_check:
+                files_to_check.append(fatal_path)
+        for fpath in files_to_check:
+            for issue in self.session.file_diagnostics.get(fpath, []):
+                if issue.key_path in ("", row_data.key_path) or issue.kind in ("invalid_json", "leaf_before_branch"):
+                    diags.append(f"[{issue.kind}] ({fpath}:{issue.line}) {issue.message}")
+        for w in self.session.warnings:
+            if (
+                w.kind == "multi_file_collision"
+                and w.lang == self.session.base_lang
+                and w.key_path == row_data.key_path
+            ):
+                diags.append(f"[{w.kind}] {w.message}")
+        for base_iss in row_data.base_issues:
+            diags.append(f"[{base_iss.severity}] {base_iss.message}")
+        return diags
+
     def _clear_inspector_dynamic_actions(self) -> None:
         _clear_layout_widgets(self.inspector_dynamic_layout)
 
@@ -1792,12 +1912,13 @@ class MainWindow(QMainWindow):
         col = src.column()
         if col < 2 or not self.session.target_langs:
             self.inspector_key_label.setText(f"{row_data.key_path}\nLanguage: {self.session.base_lang} (Base)")
+            line_info = f" (line {row_data.base_line})" if row_data.base_line else ""
             self.inspector_origin_label.setText(
-                f"Source: {row_data.base_source_file or '(missing)'} (line {row_data.base_line})"
+                f"Source: {row_data.base_source_file or '(missing)'}{line_info}"
             )
-            self.inspector_state_label.setText("State: Reference (read-only)")
+            self.inspector_state_label.setText(self._format_base_state_label(row_data))
             self.inspector_stale_label.setVisible(False)
-            base_diags = [f"[{i.severity}] {i.message}" for i in row_data.base_issues]
+            base_diags = self._collect_base_diagnostics(row_data)
             self.inspector_diag_label.setText("\n".join(base_diags) if base_diags else "")
             self._clear_inspector_dynamic_actions()
             return

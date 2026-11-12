@@ -12,8 +12,13 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QFont, QUndoStack
 
-from app.core.project_manager import CellData, CellKind, PackageSession, TableRowData
-from app.ui.commands import EditCellCommand
+from app.core.project_manager import (
+    CellData,
+    CellKind,
+    PackageSession,
+    TableRowData,
+)
+from app.ui.commands import EditBaseCellCommand, EditCellCommand
 
 StatusFilterMode = Literal["all", "pending", "edited", "alerts", "glossary"]
 BASE_ISSUES_ROLE = int(Qt.ItemDataRole.UserRole) + 1
@@ -91,7 +96,7 @@ class TranslationTableModel(QAbstractTableModel):
 
     def flags(self, index: QModelIndex | QPersistentModelIndex) -> Qt.ItemFlag:
         base = super().flags(index)
-        if not index.isValid() or index.column() < 2:
+        if not index.isValid() or index.column() < 1:
             return base
         cell = self.get_cell(index.row(), index.column())
         if cell is None or not cell.can_edit():
@@ -104,10 +109,14 @@ class TranslationTableModel(QAbstractTableModel):
         return None
 
     def get_cell(self, row: int, col: int) -> CellData | None:
-        if col < 2 or row < 0 or row >= len(self.rows):
+        if col < 1 or row < 0 or row >= len(self.rows):
             return None
-        lang = self.target_langs[col - 2]
-        return self.rows[row].cells.get(lang)
+        if col == 1:
+            return self.rows[row].base_cell
+        idx = col - 2
+        if 0 <= idx < len(self.target_langs):
+            return self.rows[row].cells.get(self.target_langs[idx])
+        return None
 
     def notify_cell_changed(self, row: int, col: int) -> None:
         if 0 <= row < len(self.rows):
@@ -115,6 +124,14 @@ class TranslationTableModel(QAbstractTableModel):
         idx = self.index(row, col)
         self.dataChanged.emit(idx, idx)
         self.cell_edited.emit(row, col)
+
+    def notify_row_changed(self, row: int, edited_col: int = 1) -> None:
+        """Emit row-wide dataChanged and cell_edited after a base edit affects target cells."""
+        if 0 <= row < len(self.rows):
+            self.rows[row].rebuild_search_blob()
+        last_col = max(1, self.columnCount() - 1)
+        self.dataChanged.emit(self.index(row, 1), self.index(row, last_col))
+        self.cell_edited.emit(row, edited_col)
 
     def data(
         self,
@@ -127,7 +144,7 @@ class TranslationTableModel(QAbstractTableModel):
         col = index.column()
 
         if role == Qt.ItemDataRole.EditRole:
-            if col < 2:
+            if col < 1:
                 return None
             cell = self.get_cell(index.row(), col)
             return cell.local_value or "" if cell is not None else ""
@@ -136,7 +153,14 @@ class TranslationTableModel(QAbstractTableModel):
             if col == 0:
                 return row_data.key_path
             if col == 1:
-                return row_data.base_text if row_data.base_text is not None else "(missing in base)"
+                cell = self.get_cell(index.row(), 1)
+                if cell is not None and cell.kind == CellKind.NON_STRING and row_data.base_text is None:
+                    return f"[non-string: {cell.raw_type}]"
+                if row_data.base_text is None:
+                    return "(missing in base)"
+                if row_data.base_text == "":
+                    return '""'
+                return row_data.base_text
             cell = self.get_cell(index.row(), col)
             if cell is None:
                 return ""
@@ -158,20 +182,28 @@ class TranslationTableModel(QAbstractTableModel):
                 font = QFont()
                 font.setStrikeOut(True)
                 return font
-            if (col == 1 and row_data.base_text is None) or (
-                cell is not None and (cell.is_missing or cell.kind in (CellKind.NON_STRING, CellKind.EMPTY))
-            ):
+            is_italic = (col == 1 and row_data.base_text is None) or (
+                cell is not None
+                and (
+                    (col >= 2 and cell.is_missing)
+                    or cell.kind in (CellKind.NON_STRING, CellKind.EMPTY)
+                )
+            )
+            if is_italic:
                 font = QFont()
                 font.setItalic(True)
                 return font
 
         if role == Qt.ItemDataRole.ForegroundRole:
-            if col == 1 and row_data.base_text is None:
-                return QColor("#6b7280")
             cell = self.get_cell(index.row(), col)
-            if cell is not None and (
-                cell.is_missing or cell.kind in (CellKind.NON_STRING, CellKind.NOT_APPLICABLE)
-            ):
+            is_muted = (col == 1 and row_data.base_text is None) or (
+                cell is not None
+                and (
+                    cell.kind in (CellKind.NON_STRING, CellKind.NOT_APPLICABLE)
+                    or (col >= 2 and cell.is_missing)
+                )
+            )
+            if is_muted:
                 return QColor("#6b7280")
 
         if role == Qt.ItemDataRole.UserRole:
@@ -188,7 +220,7 @@ class TranslationTableModel(QAbstractTableModel):
         value: Any,
         role: int = Qt.ItemDataRole.EditRole,
     ) -> bool:
-        if role != Qt.ItemDataRole.EditRole or not index.isValid() or index.column() < 2:
+        if role != Qt.ItemDataRole.EditRole or not index.isValid() or index.column() < 1:
             return False
         row_data = self.get_row(index.row())
         cell = self.get_cell(index.row(), index.column())
@@ -196,6 +228,23 @@ class TranslationTableModel(QAbstractTableModel):
             return False
         new_text = str(value)
         if not cell.will_apply_edit(new_text):
+            return False
+
+        if index.column() == 1:
+            if self.undo_stack is not None:
+                self.undo_stack.push(
+                    EditBaseCellCommand(
+                        row_data=row_data,
+                        new_value=new_text,
+                        row=index.row(),
+                        col=1,
+                        notify_row=self.notify_row_changed,
+                    )
+                )
+                return True
+            if row_data.apply_base_edit(new_text):
+                self.notify_row_changed(index.row(), 1)
+                return True
             return False
 
         if self.undo_stack is not None:
@@ -265,13 +314,16 @@ class PackageFilterProxyModel(QSortFilterProxyModel):
             if not any(c.is_pending for c in row_data.cells.values()):
                 return False
         elif self.status_filter == "edited":
-            if not any(c.is_dirty for c in row_data.cells.values()):
+            base_dirty = row_data.base_cell is not None and row_data.base_cell.is_dirty
+            if not (base_dirty or any(c.is_dirty for c in row_data.cells.values())):
                 return False
         elif self.status_filter == "alerts":
-            if not any(
+            has_base_alert = any(i.severity in ("critical", "warning") for i in row_data.base_issues)
+            has_target_alert = any(
                 c.validation_severity in ("critical", "warning")
                 for c in row_data.cells.values()
-            ):
+            )
+            if not (has_base_alert or has_target_alert):
                 return False
         elif self.status_filter == "glossary":
             if not any(bool(c.active_glossary_issues) for c in row_data.cells.values()):

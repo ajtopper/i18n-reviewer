@@ -118,6 +118,7 @@ class CellData:
     line: int = 0
     raw_type: str = "str"
     readonly: bool = False
+    is_base_cell: bool = False
     is_plural_suggestion: bool = False
     marked_for_deletion: bool = False
     review_status: ReviewStatus = "unreviewed"
@@ -161,6 +162,8 @@ class CellData:
 
     @property
     def is_pending(self) -> bool:
+        if self.is_base_cell:
+            return False
         if self.kind in (CellKind.NOT_APPLICABLE, CellKind.NON_STRING, CellKind.STRUCTURAL_CONFLICT):
             return False
         if self.marked_for_deletion:
@@ -181,7 +184,7 @@ class CellData:
 
     def can_mark_reviewed(self) -> bool:
         """True if the cell can be explicitly approved as reviewed."""
-        return self.can_edit() and not self.is_missing
+        return not self.is_base_cell and self.can_edit() and not self.is_missing
 
     def will_apply_edit(self, new_value: str | None) -> bool:
         """True if applying new_value would actually change this cell."""
@@ -214,7 +217,7 @@ class CellData:
             self.kind = CellKind.MISSING
         elif self.local_value == "":
             self.kind = CellKind.EMPTY
-        elif base_text is not None and self.local_value == base_text:
+        elif not self.is_base_cell and base_text is not None and self.local_value == base_text:
             self.kind = CellKind.SAME_AS_BASE
         else:
             self.kind = CellKind.TRANSLATED
@@ -291,9 +294,44 @@ class TableRowData:
     base_source_file: str = ""
     base_line: int = 0
     is_orphan_row: bool = False
+    base_cell: CellData | None = None
     cells: dict[str, CellData] = field(default_factory=dict)
     base_issues: list[ValidationIssue] = field(default_factory=list, compare=False, repr=False)
     _search_blob: str = field(default="", init=False, repr=False)
+
+    def set_base_text(self, value: str | None) -> str | None:
+        """Update active base_text, refresh the search blob, and return the previous value."""
+        old = self.base_text
+        self.base_text = value
+        self.rebuild_search_blob()
+        return old
+
+    def snapshot_target_cells(self) -> dict[str, CellSnapshot]:
+        """Capture target cell snapshots for undoable row-wide base edits."""
+        return {lang: cell.snapshot() for lang, cell in self.cells.items()}
+
+    def restore_target_cells(self, snapshots: dict[str, CellSnapshot]) -> None:
+        """Restore target cell review/kind states from previously captured snapshots."""
+        for lang, snap in snapshots.items():
+            cell = self.cells.get(lang)
+            if cell is not None:
+                cell.restore(snap)
+
+    def apply_base_edit(self, new_value: str | None) -> bool:
+        """Apply an edit to base_cell, update base_text, and propagate stale targets."""
+        if self.base_cell is None or not self.base_cell.apply_edit(new_value, base_text=None):
+            return False
+        old_base = self.set_base_text(self.base_cell.local_value)
+        propagate_base_change(self, old_base, is_revert=False)
+        return True
+
+    def revert_base_to_production(self) -> bool:
+        """Revert dirty base_cell to production value, update base_text, and propagate targets."""
+        if self.base_cell is None or not self.base_cell.revert_to_production(base_text=None):
+            return False
+        old_base = self.set_base_text(self.base_cell.local_value)
+        propagate_base_change(self, old_base, is_revert=True)
+        return True
 
     def rebuild_search_blob(self) -> None:
         parts = [self.key_path.lower(), (self.base_text or "").lower()]
@@ -738,6 +776,23 @@ def load_package_session(
                 orphan_keys.append(t_key)
                 seen_unified.add(t_key)
 
+    base_source_readonly = (
+        (base_external_path is not None)
+        or (effective_base in fatal_files_by_lang)
+        or not any(e.lang == effective_base and e.editable for e in chosen)
+    )
+    base_conflict_keys: set[str] = {
+        k for k in base_key_set if _has_structural_conflict(k, base_key_set)
+    }
+    for lf in by_lang.get(effective_base, []):
+        if (
+            lf.document is not None
+            and lf.document.fatal_error is not None
+            and lf.document.fatal_error.kind == "leaf_before_branch"
+            and lf.document.fatal_error.key_path
+        ):
+            base_conflict_keys.add(lf.document.fatal_error.key_path)
+
     rows: list[TableRowData] = []
     for key in unified_keys:
         base_entry = base_merged.get(key)
@@ -752,6 +807,12 @@ def load_package_session(
             base_source_file=effective_base_entry.source_file if effective_base_entry else "",
             base_line=effective_base_entry.line if effective_base_entry else 0,
             is_orphan_row=False,
+            base_cell=_build_base_cell(
+                base_entry,
+                is_plural_suggestion=(base_entry is None and ref_entry is not None),
+                has_structural_conflict=(key in base_conflict_keys),
+                base_source_readonly=base_source_readonly,
+            ),
         )
         for t_lang in target_langs:
             applies_to_lang = (key in base_key_set) or (key in valid_cldr_by_lang[t_lang])
@@ -768,7 +829,17 @@ def load_package_session(
         rows.append(row)
 
     for key in orphan_keys:
-        row = TableRowData(key_path=key, base_text=None, is_orphan_row=True)
+        row = TableRowData(
+            key_path=key,
+            base_text=None,
+            is_orphan_row=True,
+            base_cell=_build_base_cell(
+                None,
+                is_plural_suggestion=False,
+                has_structural_conflict=_has_structural_conflict(key, base_key_set),
+                base_source_readonly=True,
+            ),
+        )
         for t_lang in target_langs:
             t_entry = target_merged[t_lang].get(key)
             if t_entry is None:
@@ -832,6 +903,87 @@ def load_package_session(
         fatal_files_by_lang=fatal_files_by_lang,
         file_snapshots=file_snapshots,
         enabled_paths=[e.path for e in chosen],
+    )
+
+
+def propagate_base_change(
+    row_data: TableRowData,
+    old_base_text: str | None,
+    *,
+    is_revert: bool = False,
+) -> int:
+    """Recompute target kinds and propagate stale/reverted review states after a base edit."""
+    new_base_text = row_data.base_text
+    changed = old_base_text != new_base_text
+    stale_count = 0
+    for cell in row_data.cells.values():
+        cell._recompute_kind(new_base_text)
+        if not changed:
+            continue
+        if (
+            is_revert
+            and cell.review_status == "stale"
+            and cell.previous_base == new_base_text
+            and not cell.is_dirty
+        ):
+            cell.review_status = "reviewed"
+            cell.previous_base = None
+        elif cell.review_status == "reviewed":
+            cell.review_status = "stale"
+            if cell.previous_base is None:
+                cell.previous_base = old_base_text
+            stale_count += 1
+    return stale_count
+
+
+def _build_base_cell(
+    base_entry: LangEntry | None,
+    *,
+    is_plural_suggestion: bool,
+    has_structural_conflict: bool,
+    base_source_readonly: bool,
+) -> CellData:
+    """Build the Base-column CellData enforcing local vs read-only boundaries."""
+    if has_structural_conflict:
+        val = base_entry.value if base_entry and base_entry.is_string else None
+        return CellData(
+            prod_value=val,
+            local_value=val,
+            kind=CellKind.STRUCTURAL_CONFLICT,
+            source_file=base_entry.source_file if base_entry else "",
+            line=base_entry.line if base_entry else 0,
+            readonly=True,
+            is_base_cell=True,
+        )
+    if base_entry is None:
+        return CellData(
+            prod_value=None,
+            local_value=None,
+            kind=CellKind.MISSING,
+            readonly=True,
+            is_base_cell=True,
+            is_plural_suggestion=is_plural_suggestion,
+        )
+    if not base_entry.is_string:
+        return CellData(
+            prod_value=None,
+            local_value=None,
+            kind=CellKind.NON_STRING,
+            source_file=base_entry.source_file,
+            line=base_entry.line,
+            raw_type=base_entry.raw_type,
+            readonly=True,
+            is_base_cell=True,
+        )
+    val = base_entry.value if base_entry.value is not None else ""
+    return CellData(
+        prod_value=val,
+        local_value=val,
+        kind=CellKind.EMPTY if val == "" else CellKind.TRANSLATED,
+        source_file=base_entry.source_file,
+        line=base_entry.line,
+        readonly=base_source_readonly,
+        is_base_cell=True,
     )
 
 

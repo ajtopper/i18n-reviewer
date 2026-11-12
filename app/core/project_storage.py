@@ -19,8 +19,10 @@ from app.core.project_manager import (
     LoadedFileInfo,
     PackageSession,
     ReviewStatus,
+    TableRowData,
     discover_manifest,
     load_package_session,
+    propagate_base_change,
 )
 from app.core.validator import CustomEnricherRule, IgnoredWarning
 
@@ -130,6 +132,13 @@ def _collect_drafts_and_review_state(
     review_state: dict[str, dict[str, dict[str, Any]]] = {}
 
     for row in session.rows:
+        if (
+            row.base_cell is not None
+            and row.base_cell.local_value != row.base_cell.prod_value
+            and row.base_cell.local_value is not None
+        ):
+            edits.setdefault(session.base_lang, {})[row.key_path] = row.base_cell.local_value
+
         for lang, cell in row.cells.items():
             if cell.marked_for_deletion:
                 deletions.setdefault(lang, []).append(row.key_path)
@@ -358,6 +367,60 @@ def _mark_stale_if_base_changed(
         report.stale_marked_count += 1
 
 
+def _sync_base_row(
+    row: TableRowData,
+    *,
+    base_lang: str,
+    base_changed: bool,
+    base_blocked: bool,
+    base_source_editable: bool,
+    snap_base: str | None,
+    base_draft: str | None,
+    report: SyncReport,
+) -> tuple[bool, str | None, str | None]:
+    """Synchronize one row's base_cell with disk changes, local drafts, and 3-way conflicts."""
+    base_cell = row.base_cell
+    disk_base = base_cell.prod_value if base_cell is not None else row.base_text
+
+    def _apply_draft() -> str | None:
+        if base_cell is not None and base_draft is not None:
+            if base_cell.kind == CellKind.MISSING and base_source_editable:
+                base_cell.readonly = False
+            if base_cell.can_edit() and base_cell.apply_edit(base_draft, base_text=None):
+                row.set_base_text(base_cell.local_value)
+        return row.base_text
+
+    if not base_changed or base_blocked:
+        new_base = _apply_draft() if base_draft is not None else row.base_text
+        return False, snap_base, new_base
+
+    if base_draft is None:
+        changed = snap_base != disk_base
+        if changed:
+            report.auto_absorbed_count += 1
+        return changed, snap_base, row.base_text
+
+    if disk_base == snap_base:
+        return False, snap_base, _apply_draft()
+
+    if base_draft == disk_base:
+        report.converged_count += 1
+        return False, snap_base, row.base_text
+
+    report.conflicts.append(
+        SyncConflict(
+            key_path=row.key_path,
+            lang=base_lang,
+            snapshot_value=snap_base,
+            disk_value=disk_base,
+            local_value=base_draft,
+            base_text=disk_base,
+            was_deletion_draft=False,
+        )
+    )
+    return False, snap_base, _apply_draft()
+
+
 def _apply_saved_state_and_sync(
     session: PackageSession,
     saved_snapshots: dict[str, FileSnapshot],
@@ -392,12 +455,26 @@ def _apply_saved_state_and_sync(
             changed_langs.add(lf.lang)
 
     base_changed = session.base_lang in changed_langs
+    base_blocked = session.base_lang in blocked_langs
+    base_source_editable = (
+        session.base_external_path is None
+        and not base_blocked
+        and any(e.lang == session.base_lang and e.editable for e in session.manifest.entries)
+    )
 
     for row in session.rows:
         key = row.key_path
-        old_base_text = saved_base_entries.get(key)
-        new_base_text = row.base_text
-        base_text_changed = base_changed and (old_base_text != new_base_text)
+        base_draft = edits.get(session.base_lang, {}).get(key)
+        base_text_changed, old_base_text, new_base_text = _sync_base_row(
+            row,
+            base_lang=session.base_lang,
+            base_changed=base_changed,
+            base_blocked=base_blocked,
+            base_source_editable=base_source_editable,
+            snap_base=saved_base_entries.get(key),
+            base_draft=base_draft,
+            report=report,
+        )
 
         for lang, cell in row.cells.items():
             lang_review = review_state.get(lang, {}).get(key, {})
@@ -411,49 +488,62 @@ def _apply_saved_state_and_sync(
                 cell.review_status = saved_status
                 cell.previous_base = saved_prev_base
                 _mark_stale_if_base_changed(cell, base_text_changed, old_base_text, report)
-                continue
+            else:
+                snap_val = saved_target_entries.get(lang, {}).get(key)
+                disk_val = cell.prod_value
+                has_local_draft = (draft_val is not None) or draft_del
 
-            snap_val = saved_target_entries.get(lang, {}).get(key)
-            disk_val = cell.prod_value
-            has_local_draft = (draft_val is not None) or draft_del
-
-            if not has_local_draft:
-                if disk_val != snap_val:
-                    report.auto_absorbed_count += 1
-                    cell.review_status = "unreviewed"
-                else:
+                if not has_local_draft:
+                    if disk_val != snap_val:
+                        report.auto_absorbed_count += 1
+                        cell.review_status = "unreviewed"
+                    else:
+                        cell.review_status = saved_status
+                        cell.previous_base = saved_prev_base
+                    _mark_stale_if_base_changed(cell, base_text_changed, old_base_text, report)
+                elif disk_val == snap_val:
+                    _reapply_local_draft(cell, draft_val, draft_del, new_base_text)
                     cell.review_status = saved_status
                     cell.previous_base = saved_prev_base
-                _mark_stale_if_base_changed(cell, base_text_changed, old_base_text, report)
-                continue
+                    _mark_stale_if_base_changed(cell, base_text_changed, old_base_text, report)
+                elif (draft_del and disk_val is None) or (not draft_del and draft_val == disk_val):
+                    report.converged_count += 1
+                    cell.review_status = saved_status
+                    _mark_stale_if_base_changed(cell, base_text_changed, old_base_text, report)
+                else:
+                    report.conflicts.append(
+                        SyncConflict(
+                            key_path=key,
+                            lang=lang,
+                            snapshot_value=snap_val,
+                            disk_value=disk_val,
+                            local_value=draft_val,
+                            base_text=new_base_text,
+                            was_deletion_draft=draft_del,
+                        )
+                    )
+                    _reapply_local_draft(cell, draft_val, draft_del, new_base_text)
 
-            if disk_val == snap_val:
-                _reapply_local_draft(cell, draft_val, draft_del, new_base_text)
-                cell.review_status = saved_status
-                cell.previous_base = saved_prev_base
-                _mark_stale_if_base_changed(cell, base_text_changed, old_base_text, report)
-                continue
-
-            if (draft_del and disk_val is None) or (not draft_del and draft_val == disk_val):
-                report.converged_count += 1
-                cell.review_status = saved_status
-                _mark_stale_if_base_changed(cell, base_text_changed, old_base_text, report)
-                continue
-
-            report.conflicts.append(
-                SyncConflict(
-                    key_path=key,
-                    lang=lang,
-                    snapshot_value=snap_val,
-                    disk_value=disk_val,
-                    local_value=draft_val,
-                    base_text=new_base_text,
-                    was_deletion_draft=draft_del,
-                )
-            )
-            _reapply_local_draft(cell, draft_val, draft_del, new_base_text)
+            cell._recompute_kind(new_base_text)
 
     return report
+
+
+def _resolve_base_conflict(row_data: TableRowData, res: ConflictResolution) -> None:
+    base_cell = row_data.base_cell
+    if base_cell is None:
+        return
+    if res.choice == "accept_disk":
+        old_base = row_data.base_text
+        if base_cell.revert_to_production(base_text=None):
+            row_data.set_base_text(base_cell.local_value)
+            propagate_base_change(row_data, old_base, is_revert=False)
+        elif base_cell.kind == CellKind.MISSING:
+            base_cell.readonly = True
+            row_data.set_base_text(None)
+            propagate_base_change(row_data, old_base, is_revert=False)
+    elif res.choice == "manual" and res.manual_value is not None:
+        row_data.apply_base_edit(res.manual_value)
 
 
 def apply_conflict_resolutions(
@@ -466,6 +556,9 @@ def apply_conflict_resolutions(
         session.pending_conflict_keys.discard((res.key_path, res.lang))
         row_data = row_map.get(res.key_path)
         if row_data is None:
+            continue
+        if res.lang == session.base_lang:
+            _resolve_base_conflict(row_data, res)
             continue
         cell = row_data.cells.get(res.lang)
         if cell is None:

@@ -25,6 +25,16 @@ _KIND_BADGES: dict[CellKind, tuple[str, str, str]] = {
 
 
 def _resolve_cell_style(cell: CellData) -> tuple[str, str, str]:
+    if cell.is_base_cell:
+        if cell.kind in (CellKind.NON_STRING, CellKind.STRUCTURAL_CONFLICT, CellKind.NOT_APPLICABLE):
+            return _KIND_BADGES[cell.kind]
+        if cell.is_dirty:
+            return ("#fef9c3", "EDITED", "#b45309")
+        if cell.kind == CellKind.EMPTY:
+            return _KIND_BADGES[CellKind.EMPTY]
+        if cell.is_missing:
+            return _KIND_BADGES[CellKind.MISSING]
+        return ("", "", "")
     if cell.marked_for_deletion:
         return ("#fee2e2", "REMOVE", "#b91c1c")
     if cell.is_missing:
@@ -91,7 +101,7 @@ class StatusCellDelegate(QStyledItemDelegate):
             return QSize(width, cached)
 
         base = super().sizeHint(option, index)
-        extra = self.BADGE_STRIP_H + 4 if index.column() >= 2 else 4
+        extra = self.BADGE_STRIP_H + 4 if index.column() >= 1 else 4
         height = min(self.MAX_ROW_HEIGHT, max(44, base.height() + extra))
         if len(self._height_cache) > 40000:
             self._height_cache.clear()
@@ -131,6 +141,9 @@ class StatusCellDelegate(QStyledItemDelegate):
         if cell.kind == CellKind.STRUCTURAL_CONFLICT or val_sev == "critical":
             stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
             painter.fillRect(stripe, QColor("#dc2626"))
+        elif index.column() == 1 and index.data(BASE_ISSUES_ROLE):
+            stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
+            painter.fillRect(stripe, QColor("#3b82f6"))
         elif val_sev == "warning" or cell.kind in (CellKind.EMPTY, CellKind.ORPHAN, CellKind.NON_STRING):
             stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
             painter.fillRect(stripe, QColor("#f59e0b"))
