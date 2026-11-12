@@ -150,7 +150,7 @@ Useful flags:
 GitHub Actions workflows under `.github/workflows/` automate validation and Windows releases:
 
 1. **Continuous Integration ([ci.yml](.github/workflows/ci.yml)):** Runs `mypy app` and `pytest -v` on every pull request and push to `main`.
-2. **Automated Windows Release ([release.yml](.github/workflows/release.yml)):** After merging to `main`, create and push a semantic version tag (or trigger the **Release Windows Build** workflow manually from GitHub Actions):
+2. **Automated Windows Release ([release.yml](.github/workflows/release.yml)):** After updating [CHANGELOG.md](CHANGELOG.md) and `pyproject.toml` and merging to `main`, create and push a semantic version tag (or trigger the **Release Windows Build** workflow manually from GitHub Actions):
 
 ```powershell
 git checkout main
