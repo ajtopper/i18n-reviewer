@@ -1,20 +1,29 @@
-# i18n Reviewer
+# i18n Reviewer — Foundry VTT Translation & Localization Review Tool
 
-A simple, practical, open-source desktop tool created for **Foundry VTT** users, translators, and module/system developers to review, validate, spellcheck, and safely update `i18n` JSON localization files while preserving original formatting byte-for-byte.
+A simple, practical, open-source Windows desktop app created for **Foundry VTT (Foundry Virtual Tabletop)** users, translators, and module/system developers to review, validate, spellcheck, and safely update `i18n` JSON localization files (`module.json` and `system.json`) while preserving original formatting byte-for-byte.
 
-This project is shared as a community contribution to make localization review accessible and reliable. In its **current stage**, **i18n Reviewer** is focused specifically on **reviewing and polishing existing `i18n` files** (side-by-side inspection, token/glossary/spellcheck validation, safe production publishing, and backups) rather than automated machine translation.
+This project is shared as a free **MIT-licensed** community contribution to make Foundry VTT translation QA accessible and reliable. In its **current stage**, **i18n Reviewer** focuses on **reviewing and polishing existing `i18n` JSON files**—catching broken `@UUID[...]` / `@Embed[...]` enrichers, Handlebars `{{...}}` placeholders, HTML tags, glossary mismatches, and typos—rather than automated machine translation.
+
+## Download (Windows)
+
+Non-developers can grab the latest pre-built Windows release from the **Releases** page:
+
+- **Installer:** `i18n-reviewer-<Version>-setup-win64.exe`
+- **Portable ZIP:** `i18n-reviewer-<Version>-win64.zip` (extract and run `i18n-reviewer.exe`)
+
+*(See [CHANGELOG.md](CHANGELOG.md) for release notes and `SHA256SUMS.txt` on each release for checksum verification.)*
 
 ---
 
-## Features Overview
+## Features Overview for Foundry VTT Localization
 
-- **Package & Project Management:** Open Foundry manifests (`module.json` or `system.json`) via **New Project...** or resume saved review sessions (`.i18nproj`) via **Open Project...**, with automatic crash-recovery drafts and external disk-change detection (**Sync now** + three-way conflict resolution).
+- **Foundry VTT Package & Project Management:** Open `module.json` or `system.json` manifests via **New Project...** (supporting multi-language, multi-file JSON layouts, CLDR plural keys, external read-only references, and conditional entries) or resume saved review sessions (`.i18nproj`) via **Open Project...**, with crash-recovery drafts and external disk-change detection (**Sync now** + three-way conflict resolution).
 - **Format-Preserving Surgical JSON Writes:** Uses source byte spans so unmodified keys, indentation, trailing newlines, duplicate-key ordering, and escaping stay intact when publishing to production.
 - **Editable Base Column & Stale Propagation:** Edit source-language entries (when editable in the manifest and not using an external file or HTTP-only reference) and automatically mark downstream target translations as `stale` with inline `Before` / `Now` comparison in the Inspector.
-- **Technical Token & Enricher Validation:** Protects Handlebars (`{{...}}` / `{{{...}}}`), Foundry `@UUID[...]` / `@Embed[...]` / enrichers, URLs, HTML tags/entities, `{placeholders}`, and user-defined custom regex rules (**Enricher Rules...**).
-- **Two-Level Glossary:** Manage global and project-specific terms, source variants, accepted translations, and `do_not_translate` terms (**Glossary...**) with CSV/JSON import & export, filtering, and inline suggestions.
-- **Bundled Offline Hunspell Spellchecking:** Live and batch spellchecking for `en_US`, `pt_BR`, `es_ES`, `fr_FR`, and `de_DE` (including the Base column) with technical/glossary masking, context-menu fixes, and a global Personal Word List.
-- **Safe Publish & Rollback Pipeline:** **Send to Production** runs SHA-256 disk checks, structural/critical blockers, `.bak` backup batching, atomic file replacement with retry backoff, and partial-failure rollback; **Restore Backup** creates a `pre-restore` backup before restoring prior batches.
+- **Foundry Enricher, HTML & Placeholder Validation:** Protects Handlebars (`{{...}}` / `{{{...}}}`), Foundry `@UUID[...]` / `@Embed[...]` / inline rolls & enrichers, URLs, HTML tags/entities, `{placeholders}`, and user-defined custom regex rules (**Enricher Rules...**).
+- **Two-Level Translation Glossary:** Manage global and project-specific terms, source variants, accepted translations, and `do_not_translate` terms (**Glossary...**) with CSV/JSON import & export, filtering, and inline suggestions (`Ctrl+Space`).
+- **Offline Hunspell Spellchecking (`en_US`, `pt_BR`, `es_ES`, `fr_FR`, `de_DE`):** Live and batch spellchecking across both target columns and the Base column with technical/glossary masking, one-click context-menu fixes, and a global Personal Word List.
+- **Safe Production Publish & Backup Rollback:** **Send to Production** runs SHA-256 disk checks, structural/critical blockers, `.bak` backup batching, atomic file replacement with retry backoff, and partial-failure rollback; **Restore Backup** creates a `pre-restore` backup before restoring prior batches.
 
 ---
 
