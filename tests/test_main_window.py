@@ -91,7 +91,7 @@ def test_main_window_opens_package_displays_columns_inspector_and_file_filter(
     assert win.inspector_panel.isHidden() is True
 
     # Rodapé numérico preenchido
-    assert "4 chaves" in win.statusBar().currentMessage()
+    assert "4 keys" in win.statusBar().currentMessage()
 
 
 def test_ticket02_editing_status_filters_search_undo_shortcuts_and_orphan_removal(
@@ -354,7 +354,8 @@ def test_ticket03_save_open_unsaved_star_recovery_watcher_conflict_and_stale_ins
     c1.previous_base = "One"
     win._on_current_changed(win.proxy_model.index(0, 2), win.proxy_model.index(0, 2))
     assert win.inspector_stale_label.isHidden() is False
-    assert "One" in win.inspector_stale_label.text()
+    assert "Before: One" in win.inspector_stale_label.text()
+    assert "Now:" in win.inspector_stale_label.text()
 
     # Grava recovery simulando fechamento inesperado e aceita restaurar ao reabrir
     c2 = win.table_model.get_cell(1, 2)
@@ -797,7 +798,7 @@ def test_ticket07_spellcheck_batch_on_demand_suggest_missing_lang_and_pwl(
     assert c_s1_eo is not None and c_s1_eo.active_spell_issues == []
 
     hdr_eo = str(win.table_model.headerData(3, Qt.Orientation.Horizontal))
-    assert "sem ortografia" in hdr_eo.lower()
+    assert "no spellcheck" in hdr_eo.lower()
     win.table.setCurrentIndex(win.proxy_model.index(0, 3))
     assert "hunspell" in win.inspector_diag_label.text().lower()
 
@@ -808,8 +809,8 @@ def test_ticket07_spellcheck_batch_on_demand_suggest_missing_lang_and_pwl(
     assert r0 is not None
     ctx_menu = win._build_cell_context_menu(r0, c_s1_pt, 2)
     action_texts = [a.text() for a in ctx_menu.actions() if not a.isSeparator()]
-    assert any("Corrigir 'feitisso'" in t for t in action_texts)
-    assert "Adicionar 'feitisso' ao dicionário" in action_texts
+    assert any("Fix 'feitisso'" in t for t in action_texts)
+    assert "Add 'feitisso' to dictionary" in action_texts
 
     # Substituição preserva spans técnicos caso palavra ocorra em URL/placeholder anterior
     assert win.proxy_model.setData(win.proxy_model.index(0, 2), "Veja {feitisso} o feitisso falhou", Qt.ItemDataRole.EditRole) is True

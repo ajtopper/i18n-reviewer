@@ -84,7 +84,7 @@ class TranslationTableModel(QAbstractTableModel):
                     cond = ", ".join(self.session.lang_conditionals[lang])
                     label = f"{lang} [{cond}]"
                 if lang in self.missing_spell_langs:
-                    label = f"{label} (sem ortografia)"
+                    label = f"{label} (no spellcheck)"
                 return label
             return ""
         return str(section + 1)
@@ -136,16 +136,16 @@ class TranslationTableModel(QAbstractTableModel):
             if col == 0:
                 return row_data.key_path
             if col == 1:
-                return row_data.base_text if row_data.base_text is not None else "(ausente na base)"
+                return row_data.base_text if row_data.base_text is not None else "(missing in base)"
             cell = self.get_cell(index.row(), col)
             if cell is None:
                 return ""
             if cell.kind == CellKind.NOT_APPLICABLE:
                 return "—"
             if cell.is_missing:
-                return "(ausente)"
+                return "(missing)"
             if cell.kind == CellKind.NON_STRING:
-                return f"[não-string: {cell.raw_type}]"
+                return f"[non-string: {cell.raw_type}]"
             if cell.kind == CellKind.EMPTY:
                 return '""'
             return cell.local_value or ""

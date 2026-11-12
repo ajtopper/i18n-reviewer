@@ -15,26 +15,26 @@ from app.ui.table_model import BASE_ISSUES_ROLE
 
 _KIND_BADGES: dict[CellKind, tuple[str, str, str]] = {
     CellKind.MISSING: ("#f3f4f6", "MISSING", "#6b7280"),
-    CellKind.EMPTY: ("#ffedd5", "[vazia]", "#c2410c"),
+    CellKind.EMPTY: ("#ffedd5", "[empty]", "#c2410c"),
     CellKind.SAME_AS_BASE: ("#eff6ff", "= base", "#1d4ed8"),
-    CellKind.ORPHAN: ("#fef3c7", "ÓRFÃ", "#b45309"),
-    CellKind.NON_STRING: ("#e5e7eb", "[não-string]", "#4b5563"),
-    CellKind.STRUCTURAL_CONFLICT: ("#fee2e2", "CONFLITO", "#b91c1c"),
+    CellKind.ORPHAN: ("#fef3c7", "ORPHAN", "#b45309"),
+    CellKind.NON_STRING: ("#e5e7eb", "[non-string]", "#4b5563"),
+    CellKind.STRUCTURAL_CONFLICT: ("#fee2e2", "CONFLICT", "#b91c1c"),
     CellKind.NOT_APPLICABLE: ("#f9fafb", "", ""),
 }
 
 
 def _resolve_cell_style(cell: CellData) -> tuple[str, str, str]:
     if cell.marked_for_deletion:
-        return ("#fee2e2", "REMOVER", "#b91c1c")
+        return ("#fee2e2", "REMOVE", "#b91c1c")
     if cell.is_missing:
         return _KIND_BADGES[CellKind.MISSING]
     if cell.kind in (CellKind.NON_STRING, CellKind.STRUCTURAL_CONFLICT, CellKind.NOT_APPLICABLE):
         return _KIND_BADGES[cell.kind]
     if cell.is_dirty:
         if cell.review_status == "reviewed":
-            return ("#fef9c3", "EDITADO · OK", "#a16207")
-        return ("#fef9c3", "EDITADO", "#b45309")
+            return ("#fef9c3", "EDITED · OK", "#a16207")
+        return ("#fef9c3", "EDITED", "#b45309")
     if cell.review_status == "stale":
         return ("#ede9fe", "STALE", "#6d28d9")
     if cell.review_status == "reviewed":

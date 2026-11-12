@@ -123,7 +123,7 @@ class OpenPackageDialog(QDialog):
 
     def __init__(self, manifest: ManifestInfo, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Configurar pacote: {manifest.package_id}")
+        self.setWindowTitle(f"Configure package: {manifest.package_id}")
         self.resize(520, 380)
         self.manifest = manifest
         self.external_base_path: Path | None = None
@@ -141,22 +141,22 @@ class OpenPackageDialog(QDialog):
             idx = self.base_combo.findData(manifest.default_base_lang)
             if idx >= 0:
                 self.base_combo.setCurrentIndex(idx)
-        form.addRow("Idioma base:", self.base_combo)
+        form.addRow("Base language:", self.base_combo)
 
         ext_row = QHBoxLayout()
-        self.ext_label = QLabel("(nenhum — usar do manifest)")
-        btn_ext = QPushButton("Escolher JSON externo...")
+        self.ext_label = QLabel("(none — use manifest default)")
+        btn_ext = QPushButton("Choose external JSON...")
         btn_ext.clicked.connect(self._pick_external_base)
         ext_row.addWidget(self.ext_label, 1)
         ext_row.addWidget(btn_ext)
-        form.addRow("Base externa:", ext_row)
+        form.addRow("External base:", ext_row)
         layout.addLayout(form)
 
-        layout.addWidget(QLabel("Arquivos declarados em languages[]:"))
+        layout.addWidget(QLabel("Files declared in languages[]:"))
         self.entry_list = QListWidget()
         for entry in manifest.entries:
             cond = f" [{entry.conditional}]" if entry.conditional else ""
-            suffix = " (HTTP - somente leitura)" if entry.is_http else (" (inválido)" if not entry.editable else "")
+            suffix = " (HTTP - read-only)" if entry.is_http else (" (invalid)" if not entry.editable else "")
             item = QListWidgetItem(f"{entry.lang} — {entry.path}{cond}{suffix}")
             item.setData(Qt.ItemDataRole.UserRole, entry)
             if entry.editable:
@@ -177,7 +177,7 @@ class OpenPackageDialog(QDialog):
     def _pick_external_base(self) -> None:
         path_str, _ = QFileDialog.getOpenFileName(
             self,
-            "Selecionar arquivo JSON de referência",
+            "Select reference JSON file",
             str(self.manifest.package_root),
             "JSON (*.json)",
         )
@@ -225,7 +225,7 @@ class ExpandedEditorDialog(QDialog):
         glossary_entries: list[GlossaryEntry] | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Editor Expandido — {key_path} ({lang})")
+        self.setWindowTitle(f"Expanded Editor — {key_path} ({lang})")
         self.resize(820, 460)
         self._base_text = base_text
         self._key_path = key_path
@@ -234,7 +234,7 @@ class ExpandedEditorDialog(QDialog):
         self._glossary_entries = list(glossary_entries or [])
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"Chave: {key_path} · Idioma: {lang}"))
+        layout.addWidget(QLabel(f"Key: {key_path} · Language: {lang}"))
 
         self.token_strip = QWidget()
         self.token_strip_layout = QHBoxLayout(self.token_strip)
@@ -243,7 +243,7 @@ class ExpandedEditorDialog(QDialog):
 
         cols = QHBoxLayout()
         left_box = QVBoxLayout()
-        left_box.addWidget(QLabel("Referência (Base):"))
+        left_box.addWidget(QLabel("Reference (Base):"))
         self.base_view = QPlainTextEdit()
         self.base_view.setReadOnly(True)
         self.base_view.setPlainText(base_text)
@@ -251,7 +251,7 @@ class ExpandedEditorDialog(QDialog):
         left_box.addWidget(self.base_view)
 
         right_box = QVBoxLayout()
-        right_box.addWidget(QLabel(f"Tradução ({lang}):"))
+        right_box.addWidget(QLabel(f"Translation ({lang}):"))
         self.target_edit = QPlainTextEdit()
         self.target_edit.setPlainText(target_text)
         TokenHighlighter(self.target_edit.document(), custom_enrichers=self._custom_enrichers)
@@ -299,7 +299,7 @@ class ExpandedEditorDialog(QDialog):
             custom_enrichers=self._custom_enrichers,
         )
         if missing:
-            self.token_strip_layout.addWidget(QLabel("Inserir faltante:"))
+            self.token_strip_layout.addWidget(QLabel("Insert missing:"))
             for tok in missing[:10]:
                 btn = QPushButton(tok)
                 btn.clicked.connect(lambda _=False, t=tok: self._insert_token_at_cursor(t))
@@ -322,11 +322,11 @@ class ExpandedEditorDialog(QDialog):
         )
         if issues:
             self.live_alert_label.setText(
-                "Alertas: " + " | ".join(f"[{i.severity}] {i.message}" for i in issues)
+                "Alerts: " + " | ".join(f"[{i.severity}] {i.message}" for i in issues)
             )
             self.live_alert_label.setStyleSheet("color: #b91c1c;")
         else:
-            self.live_alert_label.setText("Sem alertas de validação.")
+            self.live_alert_label.setText("No validation alerts.")
             self.live_alert_label.setStyleSheet("color: #15803d;")
 
     def edited_text(self) -> str:
@@ -372,28 +372,28 @@ class MainWindow(QMainWindow):
         self._bind_shortcuts()
         self.table_model.cell_edited.connect(self._on_cell_edited)
         self.setStatusBar(QStatusBar())
-        self.statusBar().showMessage("Abra um module.json ou system.json do Foundry para começar.")
+        self.statusBar().showMessage("Open a Foundry module.json or system.json to begin.")
 
     def _build_toolbar(self) -> None:
-        self.toolbar = QToolBar("Principal")
+        self.toolbar = QToolBar("Main")
         self.toolbar.setMovable(False)
         self.addToolBar(self.toolbar)
 
-        self.open_action = QAction("Novo Projeto...", self)
+        self.open_action = QAction("New Project...", self)
         self.open_action.triggered.connect(self._on_open_package_clicked)
         self.toolbar.addAction(self.open_action)
 
-        self.open_proj_action = QAction("Abrir Projeto...", self)
+        self.open_proj_action = QAction("Open Project...", self)
         self.open_proj_action.triggered.connect(self._on_open_project_clicked)
         self.toolbar.addAction(self.open_proj_action)
 
-        self.save_proj_action = QAction("Salvar Projeto (Ctrl+S)", self)
+        self.save_proj_action = QAction("Save Project (Ctrl+S)", self)
         self.save_proj_action.triggered.connect(lambda: self.save_project())
         self.toolbar.addAction(self.save_proj_action)
 
-        undo_action = self.undo_stack.createUndoAction(self, "Desfazer")
+        undo_action = self.undo_stack.createUndoAction(self, "Undo")
         undo_action.setShortcuts([QKeySequence(QKeySequence.StandardKey.Undo), QKeySequence("Ctrl+Z")])
-        redo_action = self.undo_stack.createRedoAction(self, "Refazer")
+        redo_action = self.undo_stack.createRedoAction(self, "Redo")
         redo_action.setShortcuts([QKeySequence(QKeySequence.StandardKey.Redo), QKeySequence("Ctrl+Y")])
         self.undo_action = undo_action
         self.redo_action = redo_action
@@ -401,25 +401,25 @@ class MainWindow(QMainWindow):
         self.toolbar.addAction(redo_action)
         self.toolbar.addSeparator()
 
-        self.toolbar.addWidget(QLabel(" Filtro: "))
+        self.toolbar.addWidget(QLabel(" Filter: "))
         self.status_filter_combo = QComboBox()
-        self.status_filter_combo.addItem("Todas", "all")
-        self.status_filter_combo.addItem("Apenas Pendentes", "pending")
-        self.status_filter_combo.addItem("Apenas Editadas", "edited")
-        self.status_filter_combo.addItem("Todos os Alertas", "alerts")
-        self.status_filter_combo.addItem("Inconsistências de Glossário", "glossary")
+        self.status_filter_combo.addItem("All", "all")
+        self.status_filter_combo.addItem("Pending Only", "pending")
+        self.status_filter_combo.addItem("Edited Only", "edited")
+        self.status_filter_combo.addItem("All Alerts", "alerts")
+        self.status_filter_combo.addItem("Glossary Mismatches", "glossary")
         self.status_filter_combo.currentIndexChanged.connect(self._on_status_filter_changed)
         self.toolbar.addWidget(self.status_filter_combo)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Buscar chave ou texto (Ctrl+F)...")
+        self.search_input.setPlaceholderText("Search key or text (Ctrl+F)...")
         self.search_input.setMaximumWidth(230)
         self.search_input.textChanged.connect(lambda _: self.search_debounce.start())
         self.toolbar.addWidget(self.search_input)
 
-        self.toolbar.addWidget(QLabel(" Arquivo: "))
+        self.toolbar.addWidget(QLabel(" File: "))
         self.file_filter_combo = QComboBox()
-        self.file_filter_combo.addItem("Todos os arquivos", None)
+        self.file_filter_combo.addItem("All files", None)
         self.file_filter_combo.currentIndexChanged.connect(self._on_file_filter_changed)
         self.toolbar.addWidget(self.file_filter_combo)
 
@@ -439,19 +439,19 @@ class MainWindow(QMainWindow):
         self.toggle_inspector_button.clicked.connect(self._toggle_inspector)
         self.toolbar.addWidget(self.toggle_inspector_button)
 
-        self.btn_custom_enrichers = QPushButton("Regras Enrichers...")
+        self.btn_custom_enrichers = QPushButton("Enricher Rules...")
         self.btn_custom_enrichers.clicked.connect(self.open_custom_enrichers_dialog)
         self.toolbar.addWidget(self.btn_custom_enrichers)
 
-        self.btn_glossary = QPushButton("Glossário...")
+        self.btn_glossary = QPushButton("Glossary...")
         self.btn_glossary.clicked.connect(self.open_glossary_dialog)
         self.toolbar.addWidget(self.btn_glossary)
 
-        self.btn_restore_backup = QPushButton("Restaurar Backup")
+        self.btn_restore_backup = QPushButton("Restore Backup")
         self.btn_restore_backup.clicked.connect(self.open_backup_dialog)
         self.toolbar.addWidget(self.btn_restore_backup)
 
-        self.btn_publish = QPushButton("Enviar para Produção")
+        self.btn_publish = QPushButton("Send to Production")
         self.btn_publish.setStyleSheet(
             "QPushButton { background: #15803d; color: white; font-weight: bold; padding: 4px 10px; border-radius: 4px; }"
         )
@@ -479,9 +479,9 @@ class MainWindow(QMainWindow):
         )
         ext_layout = QHBoxLayout(self.external_change_banner)
         ext_layout.setContentsMargins(6, 4, 6, 4)
-        self.external_change_label = QLabel("Arquivos do pacote foram alterados externamente no disco.")
+        self.external_change_label = QLabel("Package files were modified externally on disk.")
         self.external_change_label.setStyleSheet("color: #1e3a8a; font-weight: bold;")
-        self.btn_sync_now = QPushButton("Sincronizar agora")
+        self.btn_sync_now = QPushButton("Sync now")
         self.btn_sync_now.clicked.connect(self.sync_with_disk)
         ext_layout.addWidget(self.external_change_label, 1)
         ext_layout.addWidget(self.btn_sync_now)
@@ -513,7 +513,7 @@ class MainWindow(QMainWindow):
         self.inspector_panel.setFrameShape(QFrame.Shape.StyledPanel)
         pv = QVBoxLayout(self.inspector_panel)
 
-        self.inspector_key_label = QLabel("Selecione uma célula")
+        self.inspector_key_label = QLabel("Select a cell")
         self.inspector_key_label.setWordWrap(True)
         self.inspector_key_label.setStyleSheet("font-weight: bold; font-size: 13px;")
         self.inspector_origin_label = QLabel("")
@@ -532,15 +532,15 @@ class MainWindow(QMainWindow):
         self.inspector_dynamic_layout = QVBoxLayout(self.inspector_actions_container)
         self.inspector_dynamic_layout.setContentsMargins(0, 4, 0, 4)
 
-        self.btn_review_next = QPushButton("Marcar Revisado + Próxima (Ctrl+Enter)")
+        self.btn_review_next = QPushButton("Mark Reviewed + Next (Ctrl+Enter)")
         self.btn_review_next.clicked.connect(self.review_and_advance)
-        self.btn_next_pending = QPushButton("Próxima Pendente (Ctrl+Down)")
+        self.btn_next_pending = QPushButton("Next Pending (Ctrl+Down)")
         self.btn_next_pending.clicked.connect(self.jump_to_next_pending)
-        self.btn_expanded_editor = QPushButton("Editor Expandido (Shift+F2)")
+        self.btn_expanded_editor = QPushButton("Expanded Editor (Shift+F2)")
         self.btn_expanded_editor.clicked.connect(self.open_expanded_editor)
-        self.btn_revert_cell = QPushButton("Reverter para produção")
+        self.btn_revert_cell = QPushButton("Revert to production")
         self.btn_revert_cell.clicked.connect(self.revert_current_cell)
-        self.btn_orphan_delete = QPushButton("Remover chave órfã...")
+        self.btn_orphan_delete = QPushButton("Remove orphan key...")
         self.btn_orphan_delete.clicked.connect(self.toggle_orphan_deletion_current_cell)
 
         pv.addWidget(self.inspector_key_label)
@@ -603,7 +603,7 @@ class MainWindow(QMainWindow):
     def _on_open_package_clicked(self) -> None:
         path_str, _ = QFileDialog.getOpenFileName(
             self,
-            "Abrir manifest do Foundry VTT",
+            "Open Foundry VTT manifest",
             "",
             "Foundry Manifest (module.json system.json);;JSON (*.json)",
         )
@@ -642,7 +642,7 @@ class MainWindow(QMainWindow):
         default_dir = str(self.app_data_dir / "projects")
         path_str, _ = QFileDialog.getOpenFileName(
             self,
-            "Abrir projeto i18n Reviewer",
+            "Open i18n Reviewer project",
             default_dir,
             "i18n Reviewer Project (*.i18nproj)",
         )
@@ -655,29 +655,29 @@ class MainWindow(QMainWindow):
         except PackageNotFoundError:
             ans = QMessageBox.question(
                 self,
-                "Pacote não encontrado",
-                "A pasta do pacote Foundry não foi encontrada. Deseja relocalizá-la agora?",
+                "Package not found",
+                "The Foundry package folder could not be found. Would you like to relocate it now?",
             )
             if ans != QMessageBox.StandardButton.Yes:
                 return False
-            reloc = QFileDialog.getExistingDirectory(self, "Relocalizar pasta do pacote")
+            reloc = QFileDialog.getExistingDirectory(self, "Relocate package folder")
             if not reloc:
                 return False
             try:
                 loaded = load_project_file(project_path, relocated_root=Path(reloc))
             except PackageNotFoundError as exc:
-                QMessageBox.warning(self, "Pacote inválido", str(exc))
+                QMessageBox.warning(self, "Invalid package", str(exc))
                 return False
         except UnsupportedProjectVersionError as exc:
-            QMessageBox.critical(self, "Versão não suportada", str(exc))
+            QMessageBox.critical(self, "Unsupported version", str(exc))
             return False
 
         session = loaded.session
         if has_recovery_draft(session.project_id, self.app_data_dir):
             ans = QMessageBox.question(
                 self,
-                "Recuperação de rascunho",
-                "Foi encontrado um rascunho não salvo de uma sessão anterior. Deseja restaurá-lo?",
+                "Draft recovery",
+                "An unsaved draft from a previous session was found. Would you like to restore it?",
             )
             if ans == QMessageBox.StandardButton.Yes:
                 loaded = load_project_file(
@@ -696,8 +696,8 @@ class MainWindow(QMainWindow):
         if loaded.sync_report.blocked_files:
             QMessageBox.warning(
                 self,
-                "Arquivos bloqueados na sincronização",
-                f"Arquivos ausentes ou inválidos impediram sincronização completa: {', '.join(loaded.sync_report.blocked_files)}",
+                "Files blocked during sync",
+                f"Missing or invalid files prevented a full sync: {', '.join(loaded.sync_report.blocked_files)}",
             )
 
         self.load_session(session, preserve_unsaved=self._project_unsaved)
@@ -724,7 +724,7 @@ class MainWindow(QMainWindow):
             suggested = str(default_dir / f"{self.session.manifest.package_id}.i18nproj")
             path_str, _ = QFileDialog.getSaveFileName(
                 self,
-                "Salvar Projeto (.i18nproj)",
+                "Save Project (.i18nproj)",
                 suggested,
                 "i18n Reviewer Project (*.i18nproj)",
             )
@@ -742,7 +742,7 @@ class MainWindow(QMainWindow):
         changed = check_external_disk_changes(self.session)
         if changed:
             self.external_change_label.setText(
-                f"Alteração externa detectada em: {', '.join(changed)}"
+                f"External change detected in: {', '.join(changed)}"
             )
             self.external_change_banner.setVisible(True)
         else:
@@ -755,8 +755,8 @@ class MainWindow(QMainWindow):
         if preview.report.blocked_files:
             QMessageBox.warning(
                 self,
-                "Sincronização bloqueada",
-                f"Não foi possível sincronizar porque há arquivos ausentes ou inválidos: {', '.join(preview.report.blocked_files)}",
+                "Sync blocked",
+                f"Could not sync because some files are missing or invalid: {', '.join(preview.report.blocked_files)}",
             )
             return
         if preview.report.conflicts:
@@ -777,13 +777,13 @@ class MainWindow(QMainWindow):
         if plan.external_changes:
             QMessageBox.warning(
                 self,
-                "Alteração externa detectada",
-                "Arquivos do pacote mudaram no disco. Sincronize antes de enviar para produção.",
+                "External change detected",
+                "Package files changed on disk. Sync before sending to production.",
             )
             self.sync_with_disk()
             return False
         if not plan.file_plans:
-            QMessageBox.information(self, "Nada a publicar", "Nenhuma célula editada ou órfã marcada.")
+            QMessageBox.information(self, "Nothing to publish", "No edited cells or orphans marked.")
             return False
 
         dlg = PublishDialog(plan, self)
@@ -797,10 +797,10 @@ class MainWindow(QMainWindow):
         if result.failed_file is not None:
             ans = QMessageBox.question(
                 self,
-                "Falha parcial no envio",
-                f"Falha ao gravar '{result.failed_file}': {result.error}\n"
-                f"Arquivos já gravados: {', '.join(result.published_files) or '(nenhum)'}.\n\n"
-                "Deseja reverter imediatamente os arquivos já gravados neste lote?",
+                "Partial publish failure",
+                f"Failed to write '{result.failed_file}': {result.error}\n"
+                f"Files already written: {', '.join(result.published_files) or '(none)'}.\n\n"
+                "Would you like to immediately roll back the files already written in this batch?",
             )
             if ans == QMessageBox.StandardButton.Yes and result.batch_id is not None:
                 rollback_publish_batch(
@@ -835,7 +835,7 @@ class MainWindow(QMainWindow):
                 app_data_dir=self.app_data_dir,
             )
         except (OSError, ValueError) as exc:
-            QMessageBox.critical(self, "Erro ao restaurar backup", str(exc))
+            QMessageBox.critical(self, "Error restoring backup", str(exc))
             return False
 
         preview = restore_res.sync_preview
@@ -843,8 +843,8 @@ class MainWindow(QMainWindow):
             if preview.report.blocked_files:
                 QMessageBox.warning(
                     self,
-                    "Sincronização após restauração bloqueada",
-                    f"Arquivos bloqueados ao sincronizar restauração: {', '.join(preview.report.blocked_files)}",
+                    "Post-restore sync blocked",
+                    f"Blocked files while syncing restored state: {', '.join(preview.report.blocked_files)}",
                 )
             elif preview.report.conflicts:
                 resolved = self._prompt_conflict_resolutions(
@@ -885,8 +885,8 @@ class MainWindow(QMainWindow):
         if self.session is not None and self._project_unsaved:
             ans = QMessageBox.question(
                 self,
-                "Alterações não salvas",
-                "Existem alterações não salvas no projeto (.i18nproj). Deseja salvar antes de fechar?",
+                "Unsaved changes",
+                "There are unsaved changes in the project (.i18nproj). Save before closing?",
                 QMessageBox.StandardButton.Save
                 | QMessageBox.StandardButton.Discard
                 | QMessageBox.StandardButton.Cancel,
@@ -969,7 +969,7 @@ class MainWindow(QMainWindow):
     def _rebuild_file_filter(self, session: PackageSession) -> None:
         self.file_filter_combo.blockSignals(True)
         self.file_filter_combo.clear()
-        self.file_filter_combo.addItem("Todos os arquivos", None)
+        self.file_filter_combo.addItem("All files", None)
         for lf in session.files:
             self.file_filter_combo.addItem(f"{lf.lang}: {lf.rel_path}", lf.rel_path)
         self.file_filter_combo.setCurrentIndex(0)
@@ -986,7 +986,7 @@ class MainWindow(QMainWindow):
             path_part = f" ({w.path})" if w.path else ""
             lines.append(f"[{w.kind}]{path_part} {w.message}")
         if len(session.warnings) > 4:
-            lines.append(f"... e mais {len(session.warnings) - 4} aviso(s).")
+            lines.append(f"... and {len(session.warnings) - 4} more warning(s).")
         self.diagnostic_banner.setText(" | ".join(lines))
         self.diagnostic_banner.setVisible(True)
 
@@ -1006,8 +1006,8 @@ class MainWindow(QMainWindow):
         )
         diag_count = len(session.warnings) + sum(len(v) for v in session.file_diagnostics.values())
         self.statusBar().showMessage(
-            f"{total_keys} chaves · {reviewed_count} revisadas · {dirty_count} editadas · "
-            f"{missing_count} missing · {orphan_count} órfãs · {diag_count} avisos/erros"
+            f"{total_keys} keys · {reviewed_count} reviewed · {dirty_count} edited · "
+            f"{missing_count} missing · {orphan_count} orphans · {diag_count} warnings/errors"
         )
 
     def _on_status_filter_changed(self) -> None:
@@ -1099,11 +1099,11 @@ class MainWindow(QMainWindow):
             return
         target_flag = not cell.marked_for_deletion
         prompt = (
-            f"Marcar a chave órfã '{row_data.key_path}' para remoção no próximo envio para produção?"
+            f"Mark orphan key '{row_data.key_path}' for removal on the next publish to production?"
             if target_flag
-            else f"Cancelar a remoção da chave órfã '{row_data.key_path}'?"
+            else f"Cancel removal of orphan key '{row_data.key_path}'?"
         )
-        ans = QMessageBox.question(self, "Remover chave órfã", prompt)
+        ans = QMessageBox.question(self, "Remove orphan key", prompt)
         if ans != QMessageBox.StandardButton.Yes:
             return
         self.undo_stack.push(
@@ -1169,20 +1169,20 @@ class MainWindow(QMainWindow):
         source_col: int,
     ) -> QMenu:
         menu = QMenu(self)
-        menu.addAction("Marcar como Revisado", self.mark_current_reviewed)
-        menu.addAction("Marcar Revisado + Próxima (Ctrl+Enter)", self.review_and_advance)
-        menu.addAction("Editor Expandido (Shift+F2)...", self.open_expanded_editor)
+        menu.addAction("Mark as Reviewed", self.mark_current_reviewed)
+        menu.addAction("Mark Reviewed + Next (Ctrl+Enter)", self.review_and_advance)
+        menu.addAction("Expanded Editor (Shift+F2)...", self.open_expanded_editor)
         if cell.is_dirty:
-            menu.addAction("Reverter para produção", self.revert_current_cell)
+            menu.addAction("Revert to production", self.revert_current_cell)
         if cell.kind == CellKind.ORPHAN and not cell.readonly:
-            label = "Cancelar remoção de órfã" if cell.marked_for_deletion else "Remover chave órfã..."
+            label = "Cancel orphan removal" if cell.marked_for_deletion else "Remove orphan key..."
             menu.addAction(label, self.toggle_orphan_deletion_current_cell)
 
         missing_toks, alert_items = self._cell_validation_action_specs(row_data, cell)
         if missing_toks or alert_items:
             menu.addSeparator()
             for tok in missing_toks[:8]:
-                act_ins = menu.addAction(f"Inserir token faltante: {tok}")
+                act_ins = menu.addAction(f"Insert missing token: {tok}")
 
                 def _make_ins(token: str) -> Callable[[bool], None]:
                     def _handler(_checked: bool = False) -> None:
@@ -1193,9 +1193,9 @@ class MainWindow(QMainWindow):
                 act_ins.triggered.connect(_make_ins(tok))
             for rule_id, is_ignored in alert_items:
                 action_label = (
-                    f"Reativar alerta ({rule_id})"
+                    f"Re-enable alert ({rule_id})"
                     if is_ignored
-                    else f"Ignorar este alerta ({rule_id})..."
+                    else f"Ignore this alert ({rule_id})..."
                 )
                 act_ig = menu.addAction(action_label)
 
@@ -1207,7 +1207,7 @@ class MainWindow(QMainWindow):
 
                 act_ig.triggered.connect(_make_ig(rule_id))
 
-        # 3ª seção: glossário (aplicar tradução preferida / adicionar termo)
+        # 3rd section: glossary (apply preferred translation / add term)
         if self.session is not None and cell.can_edit():
             lang = self.session.target_langs[source_col - 2]
             merged = self.merged_glossary()
@@ -1221,7 +1221,7 @@ class MainWindow(QMainWindow):
                 pref = entry.preferred_translation(lang)
                 if pref is None:
                     continue
-                act_pref = menu.addAction(f"Aplicar glossário: {entry.term} → {pref}")
+                act_pref = menu.addAction(f"Apply glossary: {entry.term} → {pref}")
 
                 def _make_pref(val: str) -> Callable[[bool], None]:
                     def _handler(_checked: bool = False) -> None:
@@ -1247,10 +1247,10 @@ class MainWindow(QMainWindow):
                     prefill_lang=lang,
                 )
 
-            act_add_gloss = menu.addAction("Adicionar termo ao glossário...")
+            act_add_gloss = menu.addAction("Add term to glossary...")
             act_add_gloss.triggered.connect(_open_add_term)
 
-            # 4ª seção: sugestões ortográficas sob demanda + adicionar ao PWL global
+            # 4th section: on-demand spell suggestions + add to global PWL
             if cell.active_spell_issues:
                 menu.addSeparator()
                 for s_issue in cell.active_spell_issues[:4]:
@@ -1258,7 +1258,7 @@ class MainWindow(QMainWindow):
                         continue
                     bad_word = s_issue.missing_tokens[0]
                     for sugg in self.spell_service.suggest(lang, bad_word, limit=4):
-                        act_fix = menu.addAction(f"Corrigir '{bad_word}' → '{sugg}'")
+                        act_fix = menu.addAction(f"Fix '{bad_word}' → '{sugg}'")
 
                         def _make_fix(bw: str, rep: str) -> Callable[[bool], None]:
                             def _handler(_checked: bool = False) -> None:
@@ -1267,7 +1267,7 @@ class MainWindow(QMainWindow):
                             return _handler
 
                         act_fix.triggered.connect(_make_fix(bad_word, sugg))
-                    act_pwl = menu.addAction(f"Adicionar '{bad_word}' ao dicionário")
+                    act_pwl = menu.addAction(f"Add '{bad_word}' to dictionary")
 
                     def _make_pwl(bw: str) -> Callable[[bool], None]:
                         def _handler(_checked: bool = False) -> None:
@@ -1722,8 +1722,8 @@ class MainWindow(QMainWindow):
             if justification is None:
                 text, ok = QInputDialog.getText(
                     self,
-                    "Ignorar este alerta",
-                    f"Justificativa opcional para ignorar '{rule_id}' em {row_data.key_path} ({lang}):",
+                    "Ignore this alert",
+                    f"Optional reason for ignoring '{rule_id}' on {row_data.key_path} ({lang}):",
                 )
                 if not ok:
                     return False
@@ -1791,11 +1791,11 @@ class MainWindow(QMainWindow):
 
         col = src.column()
         if col < 2 or not self.session.target_langs:
-            self.inspector_key_label.setText(f"{row_data.key_path}\nIdioma: {self.session.base_lang} (Base)")
+            self.inspector_key_label.setText(f"{row_data.key_path}\nLanguage: {self.session.base_lang} (Base)")
             self.inspector_origin_label.setText(
-                f"Origem: {row_data.base_source_file or '(ausente)'} (linha {row_data.base_line})"
+                f"Source: {row_data.base_source_file or '(missing)'} (line {row_data.base_line})"
             )
-            self.inspector_state_label.setText("Estado: Referência (somente leitura)")
+            self.inspector_state_label.setText("State: Reference (read-only)")
             self.inspector_stale_label.setVisible(False)
             base_diags = [f"[{i.severity}] {i.message}" for i in row_data.base_issues]
             self.inspector_diag_label.setText("\n".join(base_diags) if base_diags else "")
@@ -1807,19 +1807,19 @@ class MainWindow(QMainWindow):
         if cell is None:
             return
         conds = self.session.lang_conditionals.get(lang, [])
-        cond_suffix = f"\nCondição: {', '.join(conds)}" if conds else ""
-        self.inspector_key_label.setText(f"{row_data.key_path}\nIdioma: {lang}{cond_suffix}")
-        origin = cell.source_file or row_data.base_source_file or "(desconhecido)"
-        line_info = f" (linha {cell.line})" if cell.line else ""
-        self.inspector_origin_label.setText(f"Origem: {origin}{line_info}")
-        dirty_str = "Sim" if cell.is_dirty else "Não"
+        cond_suffix = f"\nCondition: {', '.join(conds)}" if conds else ""
+        self.inspector_key_label.setText(f"{row_data.key_path}\nLanguage: {lang}{cond_suffix}")
+        origin = cell.source_file or row_data.base_source_file or "(unknown)"
+        line_info = f" (line {cell.line})" if cell.line else ""
+        self.inspector_origin_label.setText(f"Source: {origin}{line_info}")
+        dirty_str = "Yes" if cell.is_dirty else "No"
         self.inspector_state_label.setText(
-            f"Estado: {cell.kind.name} · Revisão: {cell.review_status} · Dirty: {dirty_str}"
+            f"State: {cell.kind.name} · Review: {cell.review_status} · Dirty: {dirty_str}"
         )
         if cell.review_status == "stale" or cell.previous_base is not None:
-            prev_txt = cell.previous_base if cell.previous_base is not None else "(ausente)"
-            curr_txt = row_data.base_text if row_data.base_text is not None else "(ausente)"
-            self.inspector_stale_label.setText(f"Base mudou (STALE):\nAntes: {prev_txt}\nAgora: {curr_txt}")
+            prev_txt = cell.previous_base if cell.previous_base is not None else "(missing)"
+            curr_txt = row_data.base_text if row_data.base_text is not None else "(missing)"
+            self.inspector_stale_label.setText(f"Base changed (STALE):\nBefore: {prev_txt}\nNow: {curr_txt}")
             self.inspector_stale_label.setVisible(True)
         else:
             self.inspector_stale_label.setVisible(False)
@@ -1845,7 +1845,7 @@ class MainWindow(QMainWindow):
         diags: list[str] = []
         spell_status = self.spell_service.status_for(lang)
         if not spell_status.available:
-            diags.append(f"[ortografia] {spell_status.message}")
+            diags.append(f"[spellcheck] {spell_status.message}")
         files_to_check = [cell.source_file] if cell.source_file else []
         for fatal_path in self.session.fatal_files_by_lang.get(lang, []):
             if fatal_path not in files_to_check:
@@ -1860,7 +1860,7 @@ class MainWindow(QMainWindow):
         for base_iss in row_data.base_issues:
             diags.append(f"[base:{base_iss.severity}] {base_iss.message}")
         for v_iss in cell.all_validation_issues:
-            tag = f"{v_iss.severity} (ignorado)" if v_iss.is_ignored else v_iss.severity
+            tag = f"{v_iss.severity} (ignored)" if v_iss.is_ignored else v_iss.severity
             reason_sfx = f" — {v_iss.ignored_reason}" if v_iss.ignored_reason else ""
             sugg_sfx = ""
             if (
@@ -1871,10 +1871,10 @@ class MainWindow(QMainWindow):
             ):
                 suggs = self.spell_service.suggest(lang, v_iss.missing_tokens[0], limit=3)
                 if suggs:
-                    sugg_sfx = f" (Sugestões: {', '.join(suggs)})"
+                    sugg_sfx = f" (Suggestions: {', '.join(suggs)})"
             diags.append(f"[{tag}:{v_iss.rule_id}] {v_iss.message}{reason_sfx}{sugg_sfx}")
 
-        self.inspector_diag_label.setText("\n".join(diags) if diags else "Diagnóstico do arquivo: OK")
+        self.inspector_diag_label.setText("\n".join(diags) if diags else "File diagnostics: OK")
         self._clear_inspector_dynamic_actions()
         if live_text is not None:
             missing_toks = (
@@ -1891,15 +1891,15 @@ class MainWindow(QMainWindow):
             missing_toks, alert_items = self._cell_validation_action_specs(row_data, cell)
 
         for tok in missing_toks[:6]:
-            btn = QPushButton(f"Inserir: {tok}")
+            btn = QPushButton(f"Insert: {tok}")
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.clicked.connect(lambda _=False, t=tok: self.insert_missing_token_for_current(t))
             self.inspector_dynamic_layout.addWidget(btn)
         for rule_id, is_ignored in alert_items:
             lbl = (
-                f"Reativar alerta ({rule_id})"
+                f"Re-enable alert ({rule_id})"
                 if is_ignored
-                else f"Ignorar este alerta ({rule_id})"
+                else f"Ignore this alert ({rule_id})"
             )
             btn = QPushButton(lbl)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)

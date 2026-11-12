@@ -125,8 +125,8 @@ class SpellService:
             enchant_tag=tag,
             available=False,
             message=(
-                f"Sem dicionário Hunspell para '{lang}'. "
-                f"Copie {tag or lang}.aff/.dic para '{self.user_hunspell_dir}'."
+                f"No Hunspell dictionary for '{lang}'. "
+                f"Copy {tag or lang}.aff/.dic to '{self.user_hunspell_dir}'."
             ),
         )
 
@@ -149,7 +149,7 @@ class SpellService:
                     lang=lang,
                     enchant_tag=tag,
                     available=False,
-                    message=f"Falha ao abrir dicionário '{tag}': {exc}",
+                    message=f"Failed to open dictionary '{tag}': {exc}",
                 )
                 return tag, None
 
@@ -160,8 +160,8 @@ class SpellService:
                     enchant_tag=tag,
                     available=False,
                     message=(
-                        f"Falha na palavra-sentinela ('{sentinel}') ao abrir '{tag}'. "
-                        f"Verifique caminho ASCII ou reinstale em '{self.user_hunspell_dir}'."
+                        f"Sentinel word check failed ('{sentinel}') when opening '{tag}'. "
+                        f"Check ASCII path or reinstall in '{self.user_hunspell_dir}'."
                     ),
                 )
                 return tag, None
@@ -305,7 +305,7 @@ class SpellService:
                 ValidationIssue(
                     rule_id=rule_id,
                     severity="warning",
-                    message=f"Possível erro ortográfico: '{word}'.",
+                    message=f"Possible spelling error: '{word}'.",
                     missing_tokens=[word],
                     is_ignored=ig is not None,
                     ignored_reason=ig.reason if ig is not None else "",

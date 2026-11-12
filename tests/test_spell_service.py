@@ -107,5 +107,5 @@ def test_spell_service_non_ascii_path_workaround_and_sentinel_validation(
 
     svc_broken = SpellService(app_data_dir=tmp_path / "broken_sentinel", dict_factory=lambda *_a: _BrokenDict())
     assert svc_broken.is_available("pt-BR") is False
-    assert "sentinela" in svc_broken.status_for("pt-BR").message.lower()
+    assert "sentinel" in svc_broken.status_for("pt-BR").message.lower()
 

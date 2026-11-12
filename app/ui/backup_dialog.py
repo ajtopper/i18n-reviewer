@@ -42,19 +42,19 @@ class PublishDialog(QDialog):
 
     def __init__(self, plan: PublishPlan, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Enviar para Produção")
+        self.setWindowTitle("Send to Production")
         self.resize(620, 440)
         self.plan = plan
         self._item_plans: list[tuple[QListWidgetItem, PublishFilePlan]] = []
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Selecione os arquivos modificados para publicar:"))
+        layout.addWidget(QLabel("Select modified files to publish:"))
 
         self.file_list = QListWidget()
         for fp in plan.file_plans:
-            summary = f"{fp.lang} — {fp.rel_path} ({len(fp.edited_keys)} edições, {len(fp.deleted_keys)} remoções)"
+            summary = f"{fp.lang} — {fp.rel_path} ({len(fp.edited_keys)} edits, {len(fp.deleted_keys)} removals)"
             if fp.is_blocked:
-                summary += f" [BLOQUEADO: {'; '.join(fp.blocking_reasons)}]"
+                summary += f" [BLOCKED: {'; '.join(fp.blocking_reasons)}]"
             item = QListWidgetItem(summary)
             if fp.is_blocked:
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
@@ -67,7 +67,7 @@ class PublishDialog(QDialog):
         self.file_list.itemChanged.connect(self._refresh_warnings)
         layout.addWidget(self.file_list, 1)
 
-        layout.addWidget(QLabel("Resumo de avisos (confirmação única):"))
+        layout.addWidget(QLabel("Warnings summary (single confirmation):"))
         self.warnings_view = QTextEdit()
         self.warnings_view.setReadOnly(True)
         layout.addWidget(self.warnings_view, 1)
@@ -77,7 +77,7 @@ class PublishDialog(QDialog):
         )
         ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
         if ok_btn is not None:
-            ok_btn.setText("Publicar selecionados")
+            ok_btn.setText("Publish selected")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -87,22 +87,22 @@ class PublishDialog(QDialog):
         lines: list[str] = []
         for fp in self.selected_plans():
             if fp.duplicate_keys:
-                lines.append(f"• [{fp.rel_path}] Chaves duplicadas no arquivo: {', '.join(fp.duplicate_keys)}")
+                lines.append(f"• [{fp.rel_path}] Duplicate keys in file: {', '.join(fp.duplicate_keys)}")
             if fp.unreviewed_dirty_keys:
                 lines.append(
-                    f"• [{fp.rel_path}] {len(fp.unreviewed_dirty_keys)} célula(s) editada(s) ainda não revisada(s): "
+                    f"• [{fp.rel_path}] {len(fp.unreviewed_dirty_keys)} edited cell(s) still unreviewed: "
                     + ", ".join(fp.unreviewed_dirty_keys[:8])
                 )
             if fp.validation_warnings:
                 lines.append(
-                    f"• [{fp.rel_path}] {len(fp.validation_warnings)} aviso(s) de validação: "
+                    f"• [{fp.rel_path}] {len(fp.validation_warnings)} validation warning(s): "
                     + "; ".join(fp.validation_warnings[:5])
                 )
             if fp.deleted_keys:
                 lines.append(
-                    f"• [{fp.rel_path}] Chaves órfãs que serão removidas: {', '.join(sorted(fp.deleted_keys))}"
+                    f"• [{fp.rel_path}] Orphan keys slated for removal: {', '.join(sorted(fp.deleted_keys))}"
                 )
-        self.warnings_view.setPlainText("\n".join(lines) if lines else "Nenhum aviso pendente nos arquivos selecionados.")
+        self.warnings_view.setPlainText("\n".join(lines) if lines else "No pending warnings in selected files.")
 
     def selected_plans(self) -> list[PublishFilePlan]:
         return [
@@ -122,7 +122,7 @@ class BackupDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Restaurar Backup")
+        self.setWindowTitle("Restore Backup")
         self.resize(640, 440)
         self.project_id = project_id
         self.app_data_dir = app_data_dir
@@ -132,13 +132,13 @@ class BackupDialog(QDialog):
         cols = QHBoxLayout()
 
         left = QVBoxLayout()
-        left.addWidget(QLabel("Lotes de backup:"))
+        left.addWidget(QLabel("Backup batches:"))
         self.batch_list = QListWidget()
         self.batch_list.currentRowChanged.connect(self._on_batch_selected)
         left.addWidget(self.batch_list, 1)
 
         right = QVBoxLayout()
-        right.addWidget(QLabel("Arquivos do lote (opcional escolher apenas 1):"))
+        right.addWidget(QLabel("Batch files (optionally select a single file):"))
         self.file_list = QListWidget()
         right.addWidget(self.file_list, 1)
 
@@ -147,12 +147,12 @@ class BackupDialog(QDialog):
         layout.addLayout(cols, 1)
 
         self.discard_checkbox = QCheckBox(
-            "Descartar também rascunhos locais não publicados dos arquivos restaurados"
+            "Also discard unpublished local drafts for restored files"
         )
         layout.addWidget(self.discard_checkbox)
 
         btn_row = QHBoxLayout()
-        self.btn_delete = QPushButton("Excluir lote")
+        self.btn_delete = QPushButton("Delete batch")
         self.btn_delete.clicked.connect(self._on_delete_clicked)
         btn_row.addWidget(self.btn_delete)
         btn_row.addStretch()
@@ -161,7 +161,7 @@ class BackupDialog(QDialog):
         )
         ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
         if ok_btn is not None:
-            ok_btn.setText("Restaurar selecionado")
+            ok_btn.setText("Restore selected")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         btn_row.addWidget(buttons)
@@ -174,7 +174,7 @@ class BackupDialog(QDialog):
         self.file_list.clear()
         self._batches = list_backup_batches(self.project_id, app_data_dir=self.app_data_dir)
         for b in self._batches:
-            self.batch_list.addItem(f"{b.created_at} [{b.kind}] ({len(b.files)} arq.) — {b.batch_id}")
+            self.batch_list.addItem(f"{b.created_at} [{b.kind}] ({len(b.files)} file(s)) — {b.batch_id}")
         if self._batches:
             self.batch_list.setCurrentRow(0)
 
@@ -182,7 +182,7 @@ class BackupDialog(QDialog):
         self.file_list.clear()
         if row < 0 or row >= len(self._batches):
             return
-        self.file_list.addItem("(Todo o lote)")
+        self.file_list.addItem("(Entire batch)")
         for entry in self._batches[row].files:
             self.file_list.addItem(entry.rel_path)
         self.file_list.setCurrentRow(0)
@@ -193,8 +193,8 @@ class BackupDialog(QDialog):
             return
         ans = QMessageBox.question(
             self,
-            "Excluir backup",
-            f"Excluir permanentemente o lote de backup '{batch.batch_id}'?",
+            "Delete backup",
+            f"Permanently delete backup batch '{batch.batch_id}'?",
         )
         if ans == QMessageBox.StandardButton.Yes:
             delete_backup_batch(self.project_id, batch.batch_id, app_data_dir=self.app_data_dir)

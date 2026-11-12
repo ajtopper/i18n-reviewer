@@ -433,19 +433,19 @@ def prepare_publish_plan(
 
         if bucket.validation_criticals:
             fp.blocking_reasons.append(
-                f"Erros críticos de validação ({len(bucket.validation_criticals)}): "
+                f"Critical validation errors ({len(bucket.validation_criticals)}): "
                 + "; ".join(bucket.validation_criticals[:5])
             )
         if bucket.pending_sync_conflicts:
             fp.blocking_reasons.append(
-                f"Conflito de sincronização pendente nas chaves: {', '.join(bucket.pending_sync_conflicts)}"
+                f"Pending sync conflict on keys: {', '.join(bucket.pending_sync_conflicts)}"
             )
         if bucket.structural_conflicts:
             fp.blocking_reasons.append(
-                f"Conflito estrutural folha×objeto nas chaves: {', '.join(bucket.structural_conflicts)}"
+                f"Leaf vs. object structural conflict on keys: {', '.join(bucket.structural_conflicts)}"
             )
         if lf is None or lf.has_fatal_error or lf.document is None:
-            fp.blocking_reasons.append(f"Arquivo '{rel_path}' inválido ou ausente no disco.")
+            fp.blocking_reasons.append(f"File '{rel_path}' is invalid or missing on disk.")
             plans.append(fp)
             continue
 

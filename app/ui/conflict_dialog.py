@@ -30,23 +30,23 @@ class _ConflictRowWidget(QWidget):
         layout.addWidget(header)
 
         cols = QHBoxLayout()
-        snap_txt = conflict.snapshot_value if conflict.snapshot_value is not None else "(ausente)"
-        disk_txt = conflict.disk_value if conflict.disk_value is not None else "(ausente no disco)"
+        snap_txt = conflict.snapshot_value if conflict.snapshot_value is not None else "(missing)"
+        disk_txt = conflict.disk_value if conflict.disk_value is not None else "(missing on disk)"
         local_txt = (
-            "(marcado para remoção)"
+            "(marked for removal)"
             if conflict.was_deletion_draft
-            else (conflict.local_value or "(ausente)")
+            else (conflict.local_value or "(missing)")
         )
         cols.addWidget(QLabel(f"Snapshot:\n{snap_txt}"), 1)
-        cols.addWidget(QLabel(f"Disco atual:\n{disk_txt}"), 1)
-        cols.addWidget(QLabel(f"Minha edição:\n{local_txt}"), 1)
+        cols.addWidget(QLabel(f"Current on disk:\n{disk_txt}"), 1)
+        cols.addWidget(QLabel(f"My edit:\n{local_txt}"), 1)
         layout.addLayout(cols)
 
         controls = QHBoxLayout()
         self.choice_combo = QComboBox()
-        self.choice_combo.addItem("Manter minha edição", "keep_local")
-        self.choice_combo.addItem("Aceitar do disco", "accept_disk")
-        self.choice_combo.addItem("Editar manualmente", "manual")
+        self.choice_combo.addItem("Keep my edit", "keep_local")
+        self.choice_combo.addItem("Accept from disk", "accept_disk")
+        self.choice_combo.addItem("Edit manually", "manual")
         self.choice_combo.currentIndexChanged.connect(self._on_choice_changed)
 
         self.manual_edit = QLineEdit(conflict.local_value or conflict.disk_value or "")
@@ -92,16 +92,16 @@ class ConflictResolutionDialog(QDialog):
 
     def __init__(self, conflicts: list[SyncConflict], parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Conflitos externos detectados ({len(conflicts)})")
+        self.setWindowTitle(f"External conflicts detected ({len(conflicts)})")
         self.resize(820, 500)
         self._row_widgets: list[_ConflictRowWidget] = []
 
         layout = QVBoxLayout(self)
         batch_row = QHBoxLayout()
-        batch_row.addWidget(QLabel("Em lote:"))
-        btn_keep_all = QPushButton("Manter todas minhas")
+        batch_row.addWidget(QLabel("Batch action:"))
+        btn_keep_all = QPushButton("Keep all mine")
         btn_keep_all.clicked.connect(lambda: self._apply_all("keep_local"))
-        btn_disk_all = QPushButton("Aceitar todas do disco")
+        btn_disk_all = QPushButton("Accept all from disk")
         btn_disk_all.clicked.connect(lambda: self._apply_all("accept_disk"))
         batch_row.addWidget(btn_keep_all)
         batch_row.addWidget(btn_disk_all)

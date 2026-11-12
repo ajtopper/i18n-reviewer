@@ -600,7 +600,7 @@ def inspect_base_defects(
             rule_id="base_label_placeholder_collision",
             severity="info",
             message=(
-                "Colisão informativa na base entre rótulo de enricher e placeholder: "
+                "Informational base collision between enricher label and placeholder: "
                 + ", ".join(f"{{{c}}}" for c in collisions)
             ),
         )
@@ -710,7 +710,7 @@ def validate_translation(
         "handlebars",
         "handlebars_mismatch",
         "critical",
-        "Expressão {{handlebars}} alterada ou ausente na tradução.",
+        "Modified or missing {{handlebars}} expression in translation.",
         ctx,
     )
     if hb_issue is not None:
@@ -722,7 +722,7 @@ def validate_translation(
         "enricher",
         "enricher_tech_mismatch",
         "critical",
-        "Parte técnica de enricher (@UUID/@Embed/@Check/[[...]]/customizado) alterada ou ausente.",
+        "Technical part of enricher (@UUID/@Embed/@Check/[[...]]/custom) is altered or missing.",
         ctx,
     )
     if en_issue is not None:
@@ -735,14 +735,14 @@ def validate_translation(
         extra_ph = [f"{{{k}}}" for k in sorted(set(t_ph.keys()) - set(b_ph.keys()))]
         parts: list[str] = []
         if missing_ph:
-            parts.append(f"ausente(s): {', '.join(missing_ph)}")
+            parts.append(f"missing: {', '.join(missing_ph)}")
         if extra_ph:
-            parts.append(f"extra(s): {', '.join(extra_ph)}")
+            parts.append(f"extra: {', '.join(extra_ph)}")
         issues.append(
             _make_issue(
                 "placeholder_mismatch",
                 "critical",
-                f"Conjunto de placeholders divergente ({'; '.join(parts)}).",
+                f"Placeholder set mismatch ({'; '.join(parts)}).",
                 missing_ph,
                 ctx,
             )
@@ -753,7 +753,7 @@ def validate_translation(
             _make_issue(
                 "placeholder_count",
                 "warning",
-                "Contagem repetida de placeholders diverge da string base.",
+                "Repeated placeholder count differs from the base string.",
                 missing_rep,
                 ctx,
             )
@@ -765,7 +765,7 @@ def validate_translation(
         "url",
         "url_mismatch",
         "warning",
-        "URL omitida ou alterada em relação à string base.",
+        "URL omitted or altered compared to the base string.",
         ctx,
     )
     if url_issue is not None:
@@ -782,7 +782,7 @@ def validate_translation(
             _make_issue(
                 "html_mismatch",
                 "warning",
-                "Tags/atributos ou entidades HTML/XML divergentes ou desbalanceadas.",
+                "Mismatched or unbalanced HTML/XML tags, attributes, or entities.",
                 missing_html,
                 ctx,
             )

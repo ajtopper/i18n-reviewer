@@ -378,9 +378,9 @@ def lint_translation_glossary(
         rule_id = f"glossary:{entry.term}"
         ignored = ignored_map.get(rule_id)
         if entry.do_not_translate:
-            msg = f"Termo não traduzível '{entry.term}' ausente ou alterado."
+            msg = f"Do-not-translate term '{entry.term}' is missing or altered."
         else:
-            msg = f"Termo de glossário '{entry.term}' esperado como: {', '.join(accepted)}."
+            msg = f"Glossary term '{entry.term}' expected as: {', '.join(accepted)}."
         issues.append(
             ValidationIssue(
                 rule_id=rule_id,

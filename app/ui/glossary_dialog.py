@@ -69,7 +69,7 @@ def open_glossary_popup_at(
         if not options:
             continue
         for idx, opt in enumerate(options):
-            suffix = " (preferida)" if idx == 0 and len(options) > 1 else ""
+            suffix = " (preferred)" if idx == 0 and len(options) > 1 else ""
             item = QListWidgetItem(f"{entry.term} → {opt}{suffix}")
             item.setData(Qt.ItemDataRole.UserRole, opt)
             popup.addItem(item)
@@ -180,7 +180,7 @@ class GlossaryDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Gerenciador de Glossário (Global + Projeto)")
+        self.setWindowTitle("Glossary Manager (Global + Project)")
         self.resize(780, 500)
         self._global_entries = list(global_entries)
         self._project_entries = list(project_entries)
@@ -191,29 +191,29 @@ class GlossaryDialog(QDialog):
         layout = QVBoxLayout(self)
 
         top_bar = QHBoxLayout()
-        top_bar.addWidget(QLabel("Escopo exibido:"))
+        top_bar.addWidget(QLabel("Active scope:"))
         self.scope_combo = QComboBox()
-        self.scope_combo.addItem("Projeto (.i18nproj)", "project")
+        self.scope_combo.addItem("Project (.i18nproj)", "project")
         self.scope_combo.addItem("Global (glossary.json)", "global")
         self.scope_combo.currentIndexChanged.connect(self._reload_list)
         top_bar.addWidget(self.scope_combo)
         top_bar.addStretch()
 
-        self.btn_import_json = QPushButton("Importar JSON...")
+        self.btn_import_json = QPushButton("Import JSON...")
         self.btn_import_json.clicked.connect(
-            lambda: self._import_with("JSON (*.json)", "Importar Glossário JSON", import_glossary_json)
+            lambda: self._import_with("JSON (*.json)", "Import JSON Glossary", import_glossary_json)
         )
-        self.btn_export_json = QPushButton("Exportar JSON...")
+        self.btn_export_json = QPushButton("Export JSON...")
         self.btn_export_json.clicked.connect(
-            lambda: self._export_with("glossary.json", "JSON (*.json)", "Exportar Glossário JSON", export_glossary_json)
+            lambda: self._export_with("glossary.json", "JSON (*.json)", "Export JSON Glossary", export_glossary_json)
         )
-        self.btn_import_csv = QPushButton("Importar CSV...")
+        self.btn_import_csv = QPushButton("Import CSV...")
         self.btn_import_csv.clicked.connect(
-            lambda: self._import_with("CSV (*.csv)", "Importar Glossário CSV", import_glossary_csv)
+            lambda: self._import_with("CSV (*.csv)", "Import CSV Glossary", import_glossary_csv)
         )
-        self.btn_export_csv = QPushButton("Exportar CSV...")
+        self.btn_export_csv = QPushButton("Export CSV...")
         self.btn_export_csv.clicked.connect(
-            lambda: self._export_with("glossary.csv", "CSV (*.csv)", "Exportar Glossário CSV", export_glossary_csv)
+            lambda: self._export_with("glossary.csv", "CSV (*.csv)", "Export CSV Glossary", export_glossary_csv)
         )
         for btn in (self.btn_import_json, self.btn_export_json, self.btn_import_csv, self.btn_export_csv):
             top_bar.addWidget(btn)
@@ -224,7 +224,7 @@ class GlossaryDialog(QDialog):
         self.entry_list = QListWidget()
         self.entry_list.currentRowChanged.connect(self._on_entry_selected)
         left_col.addWidget(self.entry_list, 1)
-        self.btn_remove = QPushButton("Remover selecionado")
+        self.btn_remove = QPushButton("Remove selected")
         self.btn_remove.clicked.connect(self._remove_selected)
         left_col.addWidget(self.btn_remove)
         cols.addLayout(left_col, 2)
@@ -232,24 +232,24 @@ class GlossaryDialog(QDialog):
         form_box = QFormLayout()
         self.term_input = QLineEdit(prefill_term)
         self.variants_input = QLineEdit()
-        self.variants_input.setPlaceholderText("Ex.: Spell Slots | Spells")
-        self.case_cb = QCheckBox("Diferenciar maiúsculas/minúsculas (case_sensitive)")
-        self.dnt_cb = QCheckBox("Não traduzir (do_not_translate)")
+        self.variants_input.setPlaceholderText("E.g., Spell Slots | Spells")
+        self.case_cb = QCheckBox("Case sensitive (case_sensitive)")
+        self.dnt_cb = QCheckBox("Do not translate (do_not_translate)")
         self.notes_input = QLineEdit()
-        form_box.addRow("Termo base:", self.term_input)
-        form_box.addRow("Variantes na base (|):", self.variants_input)
+        form_box.addRow("Source term:", self.term_input)
+        form_box.addRow("Source variants (|):", self.variants_input)
         form_box.addRow("", self.case_cb)
         form_box.addRow("", self.dnt_cb)
-        form_box.addRow("Notas:", self.notes_input)
+        form_box.addRow("Notes:", self.notes_input)
 
         self.lang_inputs: dict[str, QLineEdit] = {}
         for lang in self._target_langs:
             ed = QLineEdit(prefill_translation if lang == prefill_lang else "")
-            ed.setPlaceholderText("Preferida | aceita 2 | aceita 3")
+            ed.setPlaceholderText("Preferred | accepted 2 | accepted 3")
             self.lang_inputs[lang] = ed
-            form_box.addRow(f"Traduções ({lang}):", ed)
+            form_box.addRow(f"Translations ({lang}):", ed)
 
-        self.btn_save_entry = QPushButton("Salvar termo no escopo")
+        self.btn_save_entry = QPushButton("Save term to scope")
         self.btn_save_entry.clicked.connect(self.save_form_entry)
         form_box.addRow(self.btn_save_entry)
         cols.addLayout(form_box, 3)
@@ -275,7 +275,7 @@ class GlossaryDialog(QDialog):
     def _reload_list(self) -> None:
         self.entry_list.clear()
         for entry in self._current_bucket():
-            badge = "DNT" if entry.do_not_translate else f"{len(entry.translations)} idioma(s)"
+            badge = "DNT" if entry.do_not_translate else f"{len(entry.translations)} language(s)"
             self.entry_list.addItem(QListWidgetItem(f"{entry.term} [{badge}]"))
 
     def _on_entry_selected(self, row: int) -> None:

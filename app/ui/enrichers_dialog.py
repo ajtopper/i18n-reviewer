@@ -28,14 +28,14 @@ class CustomEnrichersDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Regras de Enrichers Customizados")
+        self.setWindowTitle("Custom Enricher Rules")
         self.resize(540, 360)
         self._rules = list(rules)
 
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
-                "Configure regex opcionais (grupos nomeados ?P<tech> e ?P<label> suportados):"
+                "Configure optional regex rules (named groups ?P<tech> and ?P<label> supported):"
             )
         )
 
@@ -44,12 +44,12 @@ class CustomEnrichersDialog(QDialog):
 
         add_row = QHBoxLayout()
         self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("Nome (ex.: SystemMacro)")
+        self.name_input.setPlaceholderText("Name (e.g., SystemMacro)")
         self.pattern_input = QLineEdit()
-        self.pattern_input.setPlaceholderText(r"Regex (ex.: (?P<tech>%[A-Z_]+%))")
-        self.btn_add = QPushButton("Adicionar")
+        self.pattern_input.setPlaceholderText(r"Regex (e.g., (?P<tech>%[A-Z_]+%))")
+        self.btn_add = QPushButton("Add")
         self.btn_add.clicked.connect(self._on_add_clicked)
-        self.btn_remove = QPushButton("Remover selecionada")
+        self.btn_remove = QPushButton("Remove selected")
         self.btn_remove.clicked.connect(self._on_remove_clicked)
         add_row.addWidget(self.name_input, 1)
         add_row.addWidget(self.pattern_input, 2)
@@ -78,7 +78,7 @@ class CustomEnrichersDialog(QDialog):
         try:
             re.compile(pattern)
         except re.error as exc:
-            QMessageBox.warning(self, "Regex inválida", f"Padrão regex inválido: {exc}")
+            QMessageBox.warning(self, "Invalid Regex", f"Invalid regex pattern: {exc}")
             return
         self._rules.append(CustomEnricherRule(name=name, pattern=pattern))
         self.name_input.clear()

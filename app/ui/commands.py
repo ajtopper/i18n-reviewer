@@ -44,7 +44,7 @@ class EditCellCommand(_BaseCellCommand):
         col: int,
         notify: NotifyCallback,
     ) -> None:
-        super().__init__(f"Editar ({row}, {col})", cell, row, col, notify)
+        super().__init__(f"Edit ({row}, {col})", cell, row, col, notify)
         self.base_text = base_text
         self.new_value = new_value
 
@@ -63,7 +63,7 @@ class ReviewCellCommand(_BaseCellCommand):
         col: int,
         notify: NotifyCallback,
     ) -> None:
-        super().__init__(f"Revisar ({row}, {col})", cell, row, col, notify)
+        super().__init__(f"Review ({row}, {col})", cell, row, col, notify)
 
     def redo(self) -> None:
         if self.cell.mark_reviewed():
@@ -81,7 +81,7 @@ class RevertCellCommand(_BaseCellCommand):
         col: int,
         notify: NotifyCallback,
     ) -> None:
-        super().__init__(f"Reverter ({row}, {col})", cell, row, col, notify)
+        super().__init__(f"Revert ({row}, {col})", cell, row, col, notify)
         self.base_text = base_text
 
     def redo(self) -> None:
@@ -100,7 +100,7 @@ class ToggleOrphanDeletionCommand(_BaseCellCommand):
         col: int,
         notify: NotifyCallback,
     ) -> None:
-        super().__init__(f"Remover órfã ({row}, {col})", cell, row, col, notify)
+        super().__init__(f"Remove orphan ({row}, {col})", cell, row, col, notify)
         self.flag = flag
 
     def redo(self) -> None:
