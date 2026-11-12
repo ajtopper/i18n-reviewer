@@ -1,6 +1,8 @@
 # i18n Reviewer
 
-Desktop localization review tool built with Python and PySide6 for inspecting, editing, validating, spellchecking, and safely publishing Foundry VTT module/system JSON translation packages while preserving original formatting byte-for-byte.
+A simple, practical, open-source desktop tool created for **Foundry VTT** users, translators, and module/system developers to review, validate, spellcheck, and safely update `i18n` JSON localization files while preserving original formatting byte-for-byte.
+
+This project is shared as a community contribution to make localization review accessible and reliable. In its **current stage**, **i18n Reviewer** is focused specifically on **reviewing and polishing existing `i18n` files** (side-by-side inspection, token/glossary/spellcheck validation, safe production publishing, and backups) rather than automated machine translation.
 
 ---
 
@@ -143,6 +145,8 @@ Useful flags:
 .\dist\i18n-reviewer\i18n-reviewer.exe --self-test
 ```
 
-### Third-Party Licenses
+## License & Third-Party Notices
 
-Third-party notices and full license texts for bundled dependencies (Qt/PySide6, Enchant/Hunspell, and LibreOffice Hunspell dictionaries) are included in [licenses/THIRD_PARTY_NOTICES.md](licenses/THIRD_PARTY_NOTICES.md) and the `licenses/` directory.
+- **Application Code (`MIT`):** The **i18n Reviewer** source code in this repository is licensed under the [MIT License](LICENSE).
+- **Third-Party Libraries & Dictionaries:** Bundled dependencies and Hunspell dictionary data remain under their own respective open-source licenses—including **Qt 6 / PySide6-Essentials / Shiboken6** (`LGPL-3.0-only`), **PyEnchant / Enchant** (`LGPL-2.1-or-later` with PyEnchant linking exception), **Hunspell / GLib / libiconv / gettext** (`LGPL-2.1-or-later` / `MPL-1.1` / `GPL-2.0-or-later`), **GCC/MinGW-w64 & PyInstaller Bootloader** (`GPL` with Runtime / Bootloader Exceptions), **CPython** (`PSF-2.0`), **PCRE2** (`BSD-3-Clause`), and **LibreOffice Hunspell Dictionaries** (`MPL-2.0`, `LGPL-3.0`, `LGPL-2.1`, `GPL-2.0`/`GPL-3.0`).
+- **Distribution Compliance:** Windows `--onedir` builds keep Qt and Enchant/Hunspell shared libraries dynamically linked and replaceable, and bundle full verbatim license texts in `licenses/`. See [licenses/THIRD_PARTY_NOTICES.md](licenses/THIRD_PARTY_NOTICES.md) for complete attributions and source links.
