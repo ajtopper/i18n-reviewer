@@ -12,6 +12,7 @@ from app.core.spell_paths import resolve_sentinel_word
 from app.ui.main_window import MainWindow
 
 _SELF_TEST_SPELLS: tuple[tuple[str, str], ...] = (
+    ("en", "en_US"),
     ("pt-BR", "pt_BR"),
     ("es", "es_ES"),
     ("fr", "fr_FR"),

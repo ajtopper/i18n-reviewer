@@ -18,9 +18,11 @@ from app.core.glossary import (
 )
 from app.core.json_handler import FileStyle, ParsedLangDocument, apply_surgical_edits, parse_lang_bytes
 from app.core.project_manager import (
+    CellData,
     CellKind,
     FileSnapshot,
     PackageSession,
+    TableRowData,
     check_external_disk_changes,
     default_app_data_dir,
 )
@@ -29,7 +31,7 @@ from app.core.project_storage import (
     commit_sync_preview,
     prepare_disk_sync,
 )
-from app.core.validator import validate_translation
+from app.core.validator import inspect_base_defects, validate_translation
 
 DEFAULT_BACKUP_RETENTION = 30
 _RETRY_BACKOFFS = (0.1, 0.2, 0.3, 0.4, 0.5)
@@ -338,11 +340,87 @@ def _base_fallback_style(session: PackageSession) -> FileStyle | None:
     return None
 
 
+def _collect_row_cell_for_publish(
+    session: PackageSession,
+    row: TableRowData,
+    lang: str,
+    cell: CellData,
+    buckets: dict[str, _FilePublishBucket],
+    glossary_entries: list[Any],
+) -> None:
+    if not cell.is_dirty:
+        return
+    if cell.is_base_cell and cell.readonly:
+        return
+    rel_path = cell.source_file or resolve_target_file_for_key(
+        session, lang, row.base_source_file
+    )
+    if not rel_path:
+        return
+    bucket = buckets.setdefault(rel_path, _FilePublishBucket(lang=lang))
+    if (row.key_path, lang) in session.pending_conflict_keys:
+        bucket.pending_sync_conflicts.append(row.key_path)
+    if cell.kind == CellKind.STRUCTURAL_CONFLICT:
+        bucket.structural_conflicts.append(row.key_path)
+        return
+    if cell.is_base_cell:
+        if cell.local_value is None:
+            return
+        bucket.edits[row.key_path] = cell.local_value
+        impacted = [
+            t_lang
+            for t_lang, t_cell in row.cells.items()
+            if t_cell.review_status == "stale" or t_cell.validation_severity in ("critical", "warning")
+        ]
+        if impacted:
+            bucket.validation_warnings.append(
+                f"{row.key_path}: Base edit impacts target(s): {', '.join(impacted)}"
+            )
+        for b_iss in inspect_base_defects(cell.local_value, custom_enrichers=session.custom_enrichers):
+            if not b_iss.is_ignored:
+                bucket.validation_warnings.append(f"{row.key_path}: {b_iss.message}")
+        return
+
+    if cell.marked_for_deletion:
+        bucket.deletions.add(row.key_path)
+    elif cell.local_value is not None:
+        bucket.edits[row.key_path] = cell.local_value
+        if cell.review_status in ("unreviewed", "stale"):
+            bucket.unreviewed.append(row.key_path)
+        val_issues = validate_translation(
+            row.key_path,
+            lang,
+            row.base_text,
+            cell.local_value,
+            custom_enrichers=session.custom_enrichers,
+            ignored_warnings=session.ignored_warnings,
+            ignore_empty=False,
+        )
+        for issue in val_issues:
+            if issue.is_ignored:
+                continue
+            if issue.severity == "critical":
+                bucket.validation_criticals.append(f"{row.key_path}: {issue.message}")
+            elif issue.severity == "warning":
+                bucket.validation_warnings.append(f"{row.key_path}: {issue.message}")
+        for g_issue in lint_translation_glossary(
+            row.key_path,
+            lang,
+            row.base_text,
+            cell.local_value,
+            glossary_entries,
+            custom_enrichers=session.custom_enrichers,
+            ignored_warnings=session.ignored_warnings,
+        ):
+            if not g_issue.is_ignored:
+                bucket.validation_warnings.append(f"{row.key_path}: {g_issue.message}")
+
+
 def prepare_publish_plan(
     session: PackageSession,
     app_data_dir: Path | None = None,
 ) -> PublishPlan:
-    """Validate dirty target files, detect external changes, and build candidate JSON payloads in memory."""
+    """Validate dirty base and target files, detect external changes, and build JSON payloads."""
     external = check_external_disk_changes(session)
     base_order = [r.key_path for r in session.rows if not r.is_orphan_row]
     fallback_style = _base_fallback_style(session)
@@ -355,57 +433,22 @@ def prepare_publish_plan(
     row_by_key = {r.key_path: r for r in session.rows}
 
     for row in session.rows:
-        for lang, cell in row.cells.items():
-            if not cell.is_dirty:
-                continue
-            rel_path = cell.source_file or resolve_target_file_for_key(
-                session, lang, row.base_source_file
+        if row.base_cell is not None:
+            _collect_row_cell_for_publish(
+                session, row, session.base_lang, row.base_cell, buckets, glossary_entries
             )
-            if not rel_path:
-                continue
-            bucket = buckets.setdefault(rel_path, _FilePublishBucket(lang=lang))
-            if (row.key_path, lang) in session.pending_conflict_keys:
-                bucket.pending_sync_conflicts.append(row.key_path)
-            if cell.kind == CellKind.STRUCTURAL_CONFLICT:
-                bucket.structural_conflicts.append(row.key_path)
-                continue
-            if cell.marked_for_deletion:
-                bucket.deletions.add(row.key_path)
-            elif cell.local_value is not None:
-                bucket.edits[row.key_path] = cell.local_value
-                if cell.review_status in ("unreviewed", "stale"):
-                    bucket.unreviewed.append(row.key_path)
-                val_issues = validate_translation(
-                    row.key_path,
-                    lang,
-                    row.base_text,
-                    cell.local_value,
-                    custom_enrichers=session.custom_enrichers,
-                    ignored_warnings=session.ignored_warnings,
-                    ignore_empty=False,
-                )
-                for issue in val_issues:
-                    if issue.is_ignored:
-                        continue
-                    if issue.severity == "critical":
-                        bucket.validation_criticals.append(f"{row.key_path}: {issue.message}")
-                    elif issue.severity == "warning":
-                        bucket.validation_warnings.append(f"{row.key_path}: {issue.message}")
-                for g_issue in lint_translation_glossary(
-                    row.key_path,
-                    lang,
-                    row.base_text,
-                    cell.local_value,
-                    glossary_entries,
-                    custom_enrichers=session.custom_enrichers,
-                    ignored_warnings=session.ignored_warnings,
-                ):
-                    if not g_issue.is_ignored:
-                        bucket.validation_warnings.append(f"{row.key_path}: {g_issue.message}")
+        for lang, cell in row.cells.items():
+            _collect_row_cell_for_publish(
+                session, row, lang, cell, buckets, glossary_entries
+            )
 
     for conflict_key, conflict_lang in sorted(session.pending_conflict_keys):
         crow = row_by_key.get(conflict_key)
-        ccell = crow.cells.get(conflict_lang) if crow is not None else None
+        ccell = (
+            crow.base_cell
+            if (crow is not None and conflict_lang == session.base_lang)
+            else (crow.cells.get(conflict_lang) if crow is not None else None)
+        )
         base_src = crow.base_source_file if crow is not None else ""
         crel = (ccell.source_file if ccell is not None else "") or resolve_target_file_for_key(
             session, conflict_lang, base_src
@@ -507,17 +550,22 @@ def commit_publish_result(session: PackageSession, result: PublishResult) -> Non
     )
 
     for row in session.rows:
-        for lang, cell in row.cells.items():
+        candidates = (
+            [(session.base_lang, row.base_cell)] if row.base_cell is not None else []
+        ) + list(row.cells.items())
+        for lang, cell in candidates:
             eff_rel = cell.source_file or resolve_target_file_for_key(
                 session, lang, row.base_source_file
             )
             if eff_rel not in published_rels:
                 continue
             session.pending_conflict_keys.discard((row.key_path, lang))
-            if cell.marked_for_deletion:
+            if not cell.is_base_cell and cell.marked_for_deletion:
                 cell.clear_after_deletion()
             elif cell.is_dirty and eff_rel:
-                cell.mark_published(eff_rel, base_text=row.base_text)
+                cell.mark_published(eff_rel, base_text=(None if cell.is_base_cell else row.base_text))
+                if cell.is_base_cell:
+                    row.base_source_file = eff_rel
 
 
 def execute_publish_plan(
@@ -682,12 +730,18 @@ def restore_backup(
     if discard_local_drafts:
         restored_set = set(restored)
         for row in session.rows:
-            for lang, cell in row.cells.items():
+            candidates = ([(session.base_lang, row.base_cell)] if row.base_cell is not None else []) + list(
+                row.cells.items()
+            )
+            for lang, cell in candidates:
                 eff_rel = cell.source_file or resolve_target_file_for_key(
                     session, lang, row.base_source_file
                 )
                 if eff_rel in restored_set and cell.is_dirty:
-                    cell.revert_to_production(base_text=row.base_text)
+                    if cell.is_base_cell:
+                        row.revert_base_to_production()
+                    else:
+                        cell.revert_to_production(base_text=row.base_text)
 
     preview = prepare_disk_sync(session)
     if preview.report.blocked_files or preview.report.conflicts:

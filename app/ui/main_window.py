@@ -1217,6 +1217,82 @@ class MainWindow(QMainWindow):
         menu = self._build_cell_context_menu(row_data, cell, source_index.column())
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
+    def _column_lang(self, source_col: int) -> str | None:
+        if self.session is None or source_col < 1:
+            return None
+        if source_col == 1:
+            return self.session.base_lang
+        idx = source_col - 2
+        if 0 <= idx < len(self.session.target_langs):
+            return self.session.target_langs[idx]
+        return None
+
+    def _base_spell_text_for_row(
+        self,
+        row_data: TableRowData,
+        draft_text: str | None = None,
+    ) -> str | None:
+        base_cell = row_data.base_cell
+        if base_cell is None:
+            return row_data.base_text if draft_text is None else draft_text
+        if base_cell.kind in (CellKind.MISSING, CellKind.NON_STRING):
+            return None
+        return base_cell.local_value if draft_text is None else draft_text
+
+    def _append_alert_ignore_actions(
+        self,
+        menu: QMenu,
+        alert_items: list[tuple[str, bool]],
+    ) -> None:
+        for rule_id, is_ignored in alert_items:
+            action_label = (
+                f"Re-enable alert ({rule_id})"
+                if is_ignored
+                else f"Ignore this alert ({rule_id})..."
+            )
+            act_ig = menu.addAction(action_label)
+
+            def _make_ig(rid: str) -> Callable[[bool], None]:
+                def _handler(_checked: bool = False) -> None:
+                    self.toggle_ignore_warning_current(rid)
+
+                return _handler
+
+            act_ig.triggered.connect(_make_ig(rule_id))
+
+    def _append_spell_menu_actions(
+        self,
+        menu: QMenu,
+        cell: CellData,
+        lang: str,
+    ) -> None:
+        if not cell.active_spell_issues:
+            return
+        menu.addSeparator()
+        for s_issue in cell.active_spell_issues[:4]:
+            if not s_issue.missing_tokens:
+                continue
+            bad_word = s_issue.missing_tokens[0]
+            for sugg in self.spell_service.suggest(lang, bad_word, limit=4):
+                act_fix = menu.addAction(f"Fix '{bad_word}' → '{sugg}'")
+
+                def _make_fix(bw: str, rep: str) -> Callable[[bool], None]:
+                    def _handler(_checked: bool = False) -> None:
+                        self.replace_spell_word_for_current(bw, rep)
+
+                    return _handler
+
+                act_fix.triggered.connect(_make_fix(bad_word, sugg))
+            act_pwl = menu.addAction(f"Add '{bad_word}' to dictionary")
+
+            def _make_pwl(bw: str) -> Callable[[bool], None]:
+                def _handler(_checked: bool = False) -> None:
+                    self.add_personal_word_current(bw)
+
+                return _handler
+
+            act_pwl.triggered.connect(_make_pwl(bad_word))
+
     def _build_cell_context_menu(
         self,
         row_data: TableRowData,
@@ -1229,7 +1305,15 @@ class MainWindow(QMainWindow):
                 menu.addAction("Expanded Editor (Shift+F2)...", self.open_expanded_editor)
             if cell.is_dirty:
                 menu.addAction("Revert to production", self.revert_current_cell)
+            _, base_alerts = self._cell_validation_action_specs(row_data, cell)
+            if base_alerts:
+                menu.addSeparator()
+                self._append_alert_ignore_actions(menu, base_alerts)
+            if self.session is not None and cell.can_edit():
+                menu.addSeparator()
+                self._append_spell_menu_actions(menu, cell, self.session.base_lang)
             return menu
+
         menu.addAction("Mark as Reviewed", self.mark_current_reviewed)
         menu.addAction("Mark Reviewed + Next (Ctrl+Enter)", self.review_and_advance)
         menu.addAction("Expanded Editor (Shift+F2)...", self.open_expanded_editor)
@@ -1252,21 +1336,7 @@ class MainWindow(QMainWindow):
                     return _handler
 
                 act_ins.triggered.connect(_make_ins(tok))
-            for rule_id, is_ignored in alert_items:
-                action_label = (
-                    f"Re-enable alert ({rule_id})"
-                    if is_ignored
-                    else f"Ignore this alert ({rule_id})..."
-                )
-                act_ig = menu.addAction(action_label)
-
-                def _make_ig(rid: str) -> Callable[[bool], None]:
-                    def _handler(_checked: bool = False) -> None:
-                        self.toggle_ignore_warning_current(rid)
-
-                    return _handler
-
-                act_ig.triggered.connect(_make_ig(rule_id))
+            self._append_alert_ignore_actions(menu, alert_items)
 
         # 3rd section: glossary (apply preferred translation / add term)
         if self.session is not None and cell.can_edit():
@@ -1312,31 +1382,7 @@ class MainWindow(QMainWindow):
             act_add_gloss.triggered.connect(_open_add_term)
 
             # 4th section: on-demand spell suggestions + add to global PWL
-            if cell.active_spell_issues:
-                menu.addSeparator()
-                for s_issue in cell.active_spell_issues[:4]:
-                    if not s_issue.missing_tokens:
-                        continue
-                    bad_word = s_issue.missing_tokens[0]
-                    for sugg in self.spell_service.suggest(lang, bad_word, limit=4):
-                        act_fix = menu.addAction(f"Fix '{bad_word}' → '{sugg}'")
-
-                        def _make_fix(bw: str, rep: str) -> Callable[[bool], None]:
-                            def _handler(_checked: bool = False) -> None:
-                                self.replace_spell_word_for_current(bw, rep)
-
-                            return _handler
-
-                        act_fix.triggered.connect(_make_fix(bad_word, sugg))
-                    act_pwl = menu.addAction(f"Add '{bad_word}' to dictionary")
-
-                    def _make_pwl(bw: str) -> Callable[[bool], None]:
-                        def _handler(_checked: bool = False) -> None:
-                            self.add_personal_word_current(bw)
-
-                        return _handler
-
-                    act_pwl.triggered.connect(_make_pwl(bad_word))
+            self._append_spell_menu_actions(menu, cell, lang)
 
         return menu
 
@@ -1454,7 +1500,7 @@ class MainWindow(QMainWindow):
                 cell.local_value,
                 custom_enrichers=custom_rules,
             )
-            if cell.can_edit()
+            if (not cell.is_base_cell and cell.can_edit())
             else []
         )
         alert_items = [(issue.rule_id, issue.is_ignored) for issue in cell.all_validation_issues]
@@ -1498,11 +1544,12 @@ class MainWindow(QMainWindow):
         for idx in ordered_idxs:
             r = session.rows[idx]
             snapshots.append(
-                (
-                    idx,
-                    r.key_path,
-                    r.base_text,
-                    {lang: (c.local_value, c.is_dirty) for lang, c in r.cells.items()},
+                RowValidationSnapshot(
+                    row_index=idx,
+                    key_path=r.key_path,
+                    base_text=r.base_text,
+                    base_spell_text=self._base_spell_text_for_row(r),
+                    cell_states={lang: (c.local_value, c.is_dirty) for lang, c in r.cells.items()},
                 )
             )
 
@@ -1520,6 +1567,7 @@ class MainWindow(QMainWindow):
             glossary_entries=self.merged_glossary(),
             spell_service=self.spell_service,
             signals=self._validation_signals,
+            base_lang=session.base_lang,
         )
         QThreadPool.globalInstance().start(worker, 5)
 
@@ -1535,6 +1583,8 @@ class MainWindow(QMainWindow):
             if 0 <= item.row_index < len(rows):
                 row_data = rows[item.row_index]
                 row_data.base_issues = item.base_issues
+                if row_data.base_cell is not None:
+                    row_data.base_cell.spell_issues = item.base_spell_issues
                 for lang, issues in item.cell_validation_issues.items():
                     cell = row_data.cells.get(lang)
                     if cell is not None:
@@ -1559,7 +1609,8 @@ class MainWindow(QMainWindow):
     ) -> None:
         missing_langs: set[str] = set()
         missing_tips: dict[str, str] = {}
-        for lang in session.target_langs:
+        langs_to_check = [session.base_lang, *session.target_langs] if session.base_lang else list(session.target_langs)
+        for lang in langs_to_check:
             st = self.spell_service.status_for(lang, open_dict=open_dicts)
             if not st.available:
                 missing_langs.add(lang)
@@ -1572,8 +1623,8 @@ class MainWindow(QMainWindow):
             self.table_model.missing_spell_tooltips = missing_tips
             self.table_model.headerDataChanged.emit(
                 Qt.Orientation.Horizontal,
-                2,
-                max(2, 1 + len(session.target_langs)),
+                1,
+                max(1, 1 + len(session.target_langs)),
             )
 
     def _on_validation_finished(self, gen: int) -> None:
@@ -1625,15 +1676,37 @@ class MainWindow(QMainWindow):
             ignored_warnings=self.session.ignored_warnings,
         )
 
+    def _evaluate_base_row(
+        self,
+        row_data: TableRowData,
+        text_for_defects: str | None,
+        text_for_spell: str | None,
+        glossary: list[GlossaryEntry],
+    ) -> None:
+        if self.session is None:
+            return
+        row_data.base_issues = inspect_base_defects(
+            text_for_defects,
+            custom_enrichers=self.session.custom_enrichers,
+        )
+        if row_data.base_cell is not None:
+            row_data.base_cell.spell_issues = self.spell_service.lint_cell_spelling(
+                row_data.key_path,
+                self.session.base_lang,
+                None,
+                text_for_spell,
+                glossary_entries=glossary,
+                custom_enrichers=self.session.custom_enrichers,
+                ignored_warnings=self.session.ignored_warnings,
+            )
+
     def _validate_row_sync(self, source_row: int) -> None:
         if self.session is None or not (0 <= source_row < len(self.session.rows)):
             return
         row_data = self.session.rows[source_row]
         glossary = self.merged_glossary()
-        row_data.base_issues = inspect_base_defects(
-            row_data.base_text,
-            custom_enrichers=self.session.custom_enrichers,
-        )
+        spell_text = self._base_spell_text_for_row(row_data)
+        self._evaluate_base_row(row_data, row_data.base_text, spell_text, glossary)
         for lang, cell in row_data.cells.items():
             self._evaluate_cell_all(
                 row_data,
@@ -1653,25 +1726,29 @@ class MainWindow(QMainWindow):
             return
         row_data = self.table_model.get_row(pos[0])
         cell = self.table_model.get_cell(pos[0], pos[1])
-        if row_data is None or cell is not target_cell:
+        lang = self._column_lang(pos[1])
+        if row_data is None or cell is not target_cell or lang is None:
             return
+        glossary = self.merged_glossary()
         if pos[1] == 1:
-            row_data.base_issues = inspect_base_defects(
-                draft_text,
-                custom_enrichers=self.session.custom_enrichers,
-            )
+            spell_text = self._base_spell_text_for_row(row_data, draft_text=draft_text)
+            self._evaluate_base_row(row_data, draft_text, spell_text, glossary)
             self.table.viewport().update()
-            base_diags = self._collect_base_diagnostics(row_data)
-            self.inspector_diag_label.setText("\n".join(base_diags) if base_diags else "")
+            self._refresh_inspector_diagnostics(
+                row_data,
+                cell,
+                lang,
+                live_text=draft_text,
+                include_spell_suggestions=False,
+            )
             return
-        lang = self.session.target_langs[pos[1] - 2]
         self._evaluate_cell_all(
             row_data,
             cell,
             lang,
             draft_text,
             ignore_empty=(draft_text == cell.prod_value and not cell.is_dirty),
-            glossary=self.merged_glossary(),
+            glossary=glossary,
         )
         self.table.viewport().update()
         self._refresh_inspector_diagnostics(
@@ -1685,7 +1762,7 @@ class MainWindow(QMainWindow):
     def replace_spell_word_for_current(self, bad_word: str, replacement: str) -> bool:
         """Replace a misspelled word in unmasked prose of the current cell via QUndoStack."""
         pos = self._current_source_pos()
-        if pos is None or pos[1] < 2 or self.session is None:
+        if pos is None or pos[1] < 1 or self.session is None:
             return False
         row, col = pos
         row_data = self.table_model.get_row(row)
@@ -1700,6 +1777,17 @@ class MainWindow(QMainWindow):
         new_val = orig[: match.start()] + replacement + orig[match.end() :]
         if not cell.will_apply_edit(new_val):
             return False
+        if col == 1:
+            self.undo_stack.push(
+                EditBaseCellCommand(
+                    row_data=row_data,
+                    new_value=new_val,
+                    row=row,
+                    col=col,
+                    notify_row=self.table_model.notify_row_changed,
+                )
+            )
+            return True
         self.undo_stack.push(
             EditCellCommand(
                 cell=cell,
@@ -1715,10 +1803,12 @@ class MainWindow(QMainWindow):
     def add_personal_word_current(self, word: str) -> bool:
         """Add word to global PWL for the current column's language and revalidate session cells."""
         pos = self._current_source_pos()
-        if pos is None or pos[1] < 2 or self.session is None:
+        if pos is None or self.session is None:
             return False
         row, col = pos
-        lang = self.session.target_langs[col - 2]
+        lang = self._column_lang(col)
+        if lang is None:
+            return False
         if not self.spell_service.add_personal(lang, word):
             return False
         self._validate_row_sync(row)
@@ -1770,14 +1860,14 @@ class MainWindow(QMainWindow):
     ) -> bool:
         """Ignore or un-ignore a validation rule on the current cell for its current text hash."""
         pos = self._current_source_pos()
-        if pos is None or pos[1] < 2 or self.session is None:
+        if pos is None or pos[1] < 1 or self.session is None:
             return False
         row, col = pos
         row_data = self.table_model.get_row(row)
         cell = self.table_model.get_cell(row, col)
-        if row_data is None or cell is None:
+        lang = self._column_lang(col)
+        if row_data is None or cell is None or lang is None:
             return False
-        lang = self.session.target_langs[col - 2]
         val_hash = compute_value_hash(cell.local_value)
 
         currently_ignored = self.session.has_ignored_warning(
@@ -1812,6 +1902,7 @@ class MainWindow(QMainWindow):
         self._update_window_title()
         write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
         self.table_model.notify_cell_changed(row, col)
+        self._sync_inspector_to_current(include_spell_suggestions=True)
         return True
 
     def open_custom_enrichers_dialog(self) -> bool:
@@ -1855,29 +1946,6 @@ class MainWindow(QMainWindow):
         }.get(base_cell.kind, "read-only")
         return f"State: Base ({kind_label}) · Read-only"
 
-    def _collect_base_diagnostics(self, row_data: TableRowData) -> list[str]:
-        if self.session is None:
-            return []
-        diags: list[str] = []
-        files_to_check = [row_data.base_source_file] if row_data.base_source_file else []
-        for fatal_path in self.session.fatal_files_by_lang.get(self.session.base_lang, []):
-            if fatal_path not in files_to_check:
-                files_to_check.append(fatal_path)
-        for fpath in files_to_check:
-            for issue in self.session.file_diagnostics.get(fpath, []):
-                if issue.key_path in ("", row_data.key_path) or issue.kind in ("invalid_json", "leaf_before_branch"):
-                    diags.append(f"[{issue.kind}] ({fpath}:{issue.line}) {issue.message}")
-        for w in self.session.warnings:
-            if (
-                w.kind == "multi_file_collision"
-                and w.lang == self.session.base_lang
-                and w.key_path == row_data.key_path
-            ):
-                diags.append(f"[{w.kind}] {w.message}")
-        for base_iss in row_data.base_issues:
-            diags.append(f"[{base_iss.severity}] {base_iss.message}")
-        return diags
-
     def _clear_inspector_dynamic_actions(self) -> None:
         _clear_layout_widgets(self.inspector_dynamic_layout)
 
@@ -1918,9 +1986,12 @@ class MainWindow(QMainWindow):
             )
             self.inspector_state_label.setText(self._format_base_state_label(row_data))
             self.inspector_stale_label.setVisible(False)
-            base_diags = self._collect_base_diagnostics(row_data)
-            self.inspector_diag_label.setText("\n".join(base_diags) if base_diags else "")
-            self._clear_inspector_dynamic_actions()
+            self._refresh_inspector_diagnostics(
+                row_data,
+                row_data.base_cell,
+                self.session.base_lang,
+                include_spell_suggestions=include_spell_suggestions,
+            )
             return
 
         lang = self.session.target_langs[col - 2]
@@ -1955,7 +2026,7 @@ class MainWindow(QMainWindow):
     def _refresh_inspector_diagnostics(
         self,
         row_data: TableRowData,
-        cell: CellData,
+        cell: CellData | None,
         lang: str,
         *,
         live_text: str | None = None,
@@ -1963,11 +2034,15 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self.session is None:
             return
+        is_base = cell is None or cell.is_base_cell
         diags: list[str] = []
         spell_status = self.spell_service.status_for(lang)
         if not spell_status.available:
             diags.append(f"[spellcheck] {spell_status.message}")
-        files_to_check = [cell.source_file] if cell.source_file else []
+        source_file = cell.source_file if (cell is not None and cell.source_file) else (
+            row_data.base_source_file if is_base else None
+        )
+        files_to_check = [source_file] if source_file else []
         for fatal_path in self.session.fatal_files_by_lang.get(lang, []):
             if fatal_path not in files_to_check:
                 files_to_check.append(fatal_path)
@@ -1978,22 +2053,24 @@ class MainWindow(QMainWindow):
         for w in self.session.warnings:
             if w.kind == "multi_file_collision" and w.lang == lang and w.key_path == row_data.key_path:
                 diags.append(f"[{w.kind}] {w.message}")
+        base_prefix = "" if is_base else "base:"
         for base_iss in row_data.base_issues:
-            diags.append(f"[base:{base_iss.severity}] {base_iss.message}")
-        for v_iss in cell.all_validation_issues:
-            tag = f"{v_iss.severity} (ignored)" if v_iss.is_ignored else v_iss.severity
-            reason_sfx = f" — {v_iss.ignored_reason}" if v_iss.ignored_reason else ""
-            sugg_sfx = ""
-            if (
-                include_spell_suggestions
-                and v_iss.rule_id.startswith("spell:")
-                and not v_iss.is_ignored
-                and v_iss.missing_tokens
-            ):
-                suggs = self.spell_service.suggest(lang, v_iss.missing_tokens[0], limit=3)
-                if suggs:
-                    sugg_sfx = f" (Suggestions: {', '.join(suggs)})"
-            diags.append(f"[{tag}:{v_iss.rule_id}] {v_iss.message}{reason_sfx}{sugg_sfx}")
+            diags.append(f"[{base_prefix}{base_iss.severity}] {base_iss.message}")
+        if cell is not None:
+            for v_iss in cell.all_validation_issues:
+                tag = f"{v_iss.severity} (ignored)" if v_iss.is_ignored else v_iss.severity
+                reason_sfx = f" — {v_iss.ignored_reason}" if v_iss.ignored_reason else ""
+                sugg_sfx = ""
+                if (
+                    include_spell_suggestions
+                    and v_iss.rule_id.startswith("spell:")
+                    and not v_iss.is_ignored
+                    and v_iss.missing_tokens
+                ):
+                    suggs = self.spell_service.suggest(lang, v_iss.missing_tokens[0], limit=3)
+                    if suggs:
+                        sugg_sfx = f" (Suggestions: {', '.join(suggs)})"
+                diags.append(f"[{tag}:{v_iss.rule_id}] {v_iss.message}{reason_sfx}{sugg_sfx}")
 
         self.inspector_diag_label.setText("\n".join(diags) if diags else "File diagnostics: OK")
         self._clear_inspector_dynamic_actions()
@@ -2004,12 +2081,14 @@ class MainWindow(QMainWindow):
                     live_text,
                     custom_enrichers=self.session.custom_enrichers,
                 )
-                if cell.can_edit()
+                if (cell is not None and not is_base and cell.can_edit())
                 else []
             )
-            alert_items = [(v.rule_id, v.is_ignored) for v in cell.all_validation_issues]
-        else:
+            alert_items = [(v.rule_id, v.is_ignored) for v in cell.all_validation_issues] if cell is not None else []
+        elif cell is not None:
             missing_toks, alert_items = self._cell_validation_action_specs(row_data, cell)
+        else:
+            missing_toks, alert_items = [], []
 
         for tok in missing_toks[:6]:
             btn = QPushButton(f"Insert: {tok}")

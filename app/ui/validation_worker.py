@@ -15,7 +15,15 @@ from app.core.validator import (
     validate_translation,
 )
 
-RowValidationSnapshot = tuple[int, str, str | None, dict[str, tuple[str | None, bool]]]
+@dataclass(frozen=True)
+class RowValidationSnapshot:
+    """Immutable snapshot of one row passed to ValidationRunnable."""
+
+    row_index: int
+    key_path: str
+    base_text: str | None
+    base_spell_text: str | None
+    cell_states: dict[str, tuple[str | None, bool]]
 
 
 @dataclass(frozen=True)
@@ -24,6 +32,7 @@ class RowValidationResult:
 
     row_index: int
     base_issues: list[ValidationIssue]
+    base_spell_issues: list[ValidationIssue]
     cell_validation_issues: dict[str, list[ValidationIssue]]
     cell_glossary_issues: dict[str, list[ValidationIssue]]
     cell_spell_issues: dict[str, list[ValidationIssue]]
@@ -50,6 +59,7 @@ class ValidationRunnable(QRunnable):
         glossary_entries: list[GlossaryEntry],
         spell_service: SpellService | None,
         signals: ValidationSignals,
+        base_lang: str = "",
     ) -> None:
         super().__init__()
         self.generation = generation
@@ -61,14 +71,33 @@ class ValidationRunnable(QRunnable):
         self.glossary_entries = glossary_entries
         self.spell_service = spell_service
         self.signals = signals
+        self.base_lang = base_lang
 
     def run(self) -> None:
         try:
             batch: list[RowValidationResult] = []
-            for pos, (row_idx, key_path, base_text, cell_map_in) in enumerate(self.ordered_snapshots):
+            for pos, snap in enumerate(self.ordered_snapshots):
                 if self._is_cancelled():
                     return
+                row_idx = snap.row_index
+                key_path = snap.key_path
+                base_text = snap.base_text
+                base_spell_text = snap.base_spell_text
+                cell_map_in = snap.cell_states
                 base_issues = inspect_base_defects(base_text, custom_enrichers=self.custom_enrichers)
+                base_spell_issues = (
+                    self.spell_service.lint_cell_spelling(
+                        key_path,
+                        self.base_lang,
+                        None,
+                        base_spell_text,
+                        glossary_entries=self.glossary_entries,
+                        custom_enrichers=self.custom_enrichers,
+                        ignored_warnings=self.ignored_warnings,
+                    )
+                    if (self.spell_service is not None and self.base_lang and base_spell_text)
+                    else []
+                )
                 cell_val_out: dict[str, list[ValidationIssue]] = {}
                 cell_gloss_out: dict[str, list[ValidationIssue]] = {}
                 cell_spell_out: dict[str, list[ValidationIssue]] = {}
@@ -108,6 +137,7 @@ class ValidationRunnable(QRunnable):
                     RowValidationResult(
                         row_index=row_idx,
                         base_issues=base_issues,
+                        base_spell_issues=base_spell_issues,
                         cell_validation_issues=cell_val_out,
                         cell_glossary_issues=cell_gloss_out,
                         cell_spell_issues=cell_spell_out,

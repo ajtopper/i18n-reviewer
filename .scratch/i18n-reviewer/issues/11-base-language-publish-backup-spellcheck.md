@@ -4,12 +4,12 @@
 
 **Blocked by:** 10: Editable Base Column, Stale Propagation & Project Draft/Sync
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] **Send to Production** detects dirty base-language files, performs SHA-256 external change verification and critical/structural blocking checks on the base file, exposes warning summaries (including downstream impact or unreviewed changes), preserves formatting byte-for-byte via surgical spans, creates `.bak` entries inside the publish backup batch, and atomically writes the base JSON file with partial-failure rollback.
-- [ ] **Restore Backup** can restore a base-language file (as part of a batch or single-file selection) after creating a `pre-restore` backup, and correctly re-syncs or discards local base drafts.
-- [ ] Hunspell spellchecking runs on the base column during batch validation and live editing (respecting technical/glossary masking and `SpellService` status/missing-dictionary indicators in the Base column header and Inspector).
-- [ ] Context menu on base cells exposes validation/base actions, spell suggestions (`Fix '...' → '...'`), and `Add '...' to dictionary` (persisting in the global PWL and revalidating matching cells), plus `Ctrl+Z`/`Ctrl+Y` support for fixes.
-- [ ] `--self-test` verifies `en_US` dictionary availability alongside `pt_BR`, `es_ES`, `fr_FR`, and `de_DE` when packaged and run from both normal and non-ASCII paths.
-- [ ] Automated tests cover base-file publish/backup/restore (including retry/rollback), base spellcheck + PWL + context-menu fixes, and full `pytest` + `mypy` passing.
+- [x] **Send to Production** detects dirty base-language files, performs SHA-256 external change verification and critical/structural blocking checks on the base file, exposes warning summaries (including downstream impact or unreviewed changes), preserves formatting byte-for-byte via surgical spans, creates `.bak` entries inside the publish backup batch, and atomically writes the base JSON file with partial-failure rollback.
+- [x] **Restore Backup** can restore a base-language file (as part of a batch or single-file selection) after creating a `pre-restore` backup, and correctly re-syncs or discards local base drafts.
+- [x] Hunspell spellchecking runs on the base column during batch validation and live editing (respecting technical/glossary masking and `SpellService` status/missing-dictionary indicators in the Base column header and Inspector).
+- [x] Context menu on base cells exposes validation/base actions, spell suggestions (`Fix '...' → '...'`), and `Add '...' to dictionary` (persisting in the global PWL and revalidating matching cells), plus `Ctrl+Z`/`Ctrl+Y` support for fixes.
+- [x] `--self-test` verifies `en_US` dictionary availability alongside `pt_BR`, `es_ES`, `fr_FR`, and `de_DE` when packaged and run from both normal and non-ASCII paths.
+- [x] Automated tests cover base-file publish/backup/restore (including retry/rollback), base spellcheck + PWL + context-menu fixes, and full `pytest` + `mypy` passing.
 

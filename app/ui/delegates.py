@@ -141,12 +141,12 @@ class StatusCellDelegate(QStyledItemDelegate):
         if cell.kind == CellKind.STRUCTURAL_CONFLICT or val_sev == "critical":
             stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
             painter.fillRect(stripe, QColor("#dc2626"))
-        elif index.column() == 1 and index.data(BASE_ISSUES_ROLE):
-            stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
-            painter.fillRect(stripe, QColor("#3b82f6"))
         elif val_sev == "warning" or cell.kind in (CellKind.EMPTY, CellKind.ORPHAN, CellKind.NON_STRING):
             stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
             painter.fillRect(stripe, QColor("#f59e0b"))
+        elif index.column() == 1 and index.data(BASE_ISSUES_ROLE):
+            stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
+            painter.fillRect(stripe, QColor("#3b82f6"))
 
         if badge_text:
             font = QFont("Segoe UI", 7, QFont.Weight.Bold)

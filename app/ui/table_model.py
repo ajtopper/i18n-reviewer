@@ -70,6 +70,8 @@ class TranslationTableModel(QAbstractTableModel):
         role: int = Qt.ItemDataRole.DisplayRole,
     ) -> Any:
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.ToolTipRole:
+            if section == 1:
+                return self.missing_spell_tooltips.get(self.base_lang)
             idx = section - 2
             if 0 <= idx < len(self.target_langs):
                 return self.missing_spell_tooltips.get(self.target_langs[idx])
@@ -80,7 +82,10 @@ class TranslationTableModel(QAbstractTableModel):
             if section == 0:
                 return "KEY_PATH"
             if section == 1:
-                return f"{self.base_lang} (Base)"
+                label = f"{self.base_lang} (Base)"
+                if self.base_lang in self.missing_spell_langs:
+                    label = f"{label} (no spellcheck)"
+                return label
             idx = section - 2
             if 0 <= idx < len(self.target_langs):
                 lang = self.target_langs[idx]
@@ -318,7 +323,12 @@ class PackageFilterProxyModel(QSortFilterProxyModel):
             if not (base_dirty or any(c.is_dirty for c in row_data.cells.values())):
                 return False
         elif self.status_filter == "alerts":
-            has_base_alert = any(i.severity in ("critical", "warning") for i in row_data.base_issues)
+            has_base_alert = any(
+                i.severity in ("critical", "warning") for i in row_data.base_issues
+            ) or (
+                row_data.base_cell is not None
+                and row_data.base_cell.validation_severity in ("critical", "warning")
+            )
             has_target_alert = any(
                 c.validation_severity in ("critical", "warning")
                 for c in row_data.cells.values()
