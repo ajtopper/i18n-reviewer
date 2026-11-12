@@ -1,0 +1,2107 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable, cast
+
+from PySide6.QtCore import (
+    QEvent,
+    QFileSystemWatcher,
+    QModelIndex,
+    QObject,
+    QPersistentModelIndex,
+    QThreadPool,
+    QTimer,
+    Qt,
+)
+from PySide6.QtGui import QAction, QCloseEvent, QKeyEvent, QKeySequence, QUndoStack
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
+    QLabel,
+    QLayout,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QSplitter,
+    QStatusBar,
+    QTableView,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
+
+from app.core.backup_manager import (
+    commit_publish_result,
+    execute_publish_plan,
+    prepare_publish_plan,
+    restore_backup,
+    rollback_publish_batch,
+)
+from app.core.project_manager import (
+    CellData,
+    CellKind,
+    ManifestInfo,
+    ManifestLangEntry,
+    PackageNotFoundError,
+    PackageSession,
+    SyncConflict,
+    TableRowData,
+    UnsupportedProjectVersionError,
+    apply_conflict_resolutions,
+    check_external_disk_changes,
+    clear_recovery_draft,
+    commit_sync_preview,
+    default_app_data_dir,
+    discover_manifest,
+    has_recovery_draft,
+    load_package_session,
+    load_project_file,
+    prepare_disk_sync,
+    resolve_loaded_file_path,
+    save_project_file,
+    write_recovery_draft,
+)
+from app.core.glossary import (
+    GlossaryEntry,
+    detect_base_glossary_matches,
+    lint_translation_glossary,
+    load_global_glossary,
+    mask_technical_spans,
+    merge_glossaries,
+    save_global_glossary,
+)
+from app.core.spell_service import SpellService
+from app.core.validator import (
+    CustomEnricherRule,
+    compute_value_hash,
+    inspect_base_defects,
+    missing_tokens_for_translation,
+    term_boundary_pattern,
+    validate_translation,
+)
+from app.ui.commands import (
+    EditBaseCellCommand,
+    EditCellCommand,
+    RevertBaseCellCommand,
+    RevertCellCommand,
+    ReviewCellCommand,
+    ToggleOrphanDeletionCommand,
+)
+from app.ui.backup_dialog import BackupDialog, PublishDialog
+from app.ui.conflict_dialog import ConflictResolutionDialog
+from app.ui.delegates import StatusCellDelegate
+from app.ui.enrichers_dialog import CustomEnrichersDialog
+from app.ui.glossary_dialog import (
+    GlossaryCellContext,
+    GlossaryDialog,
+    attach_ctrl_space_glossary_popup,
+    open_glossary_popup_at,
+)
+from app.ui.highlighter import TokenHighlighter
+from app.ui.table_model import PackageFilterProxyModel, StatusFilterMode, TranslationTableModel
+from app.ui.validation_worker import (
+    RowValidationResult,
+    RowValidationSnapshot,
+    ValidationRunnable,
+    ValidationSignals,
+)
+
+
+class OpenPackageDialog(QDialog):
+    """Dialog for selecting base language, optional external base, and conditional entries."""
+
+    def __init__(self, manifest: ManifestInfo, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Configure package: {manifest.package_id}")
+        self.resize(520, 380)
+        self.manifest = manifest
+        self.external_base_path: Path | None = None
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.base_combo = QComboBox()
+        editable_langs: list[str] = []
+        for entry in manifest.entries:
+            if entry.editable and entry.lang not in editable_langs:
+                editable_langs.append(entry.lang)
+                self.base_combo.addItem(f"{entry.lang} ({entry.name})", entry.lang)
+        if manifest.default_base_lang:
+            idx = self.base_combo.findData(manifest.default_base_lang)
+            if idx >= 0:
+                self.base_combo.setCurrentIndex(idx)
+        form.addRow("Base language:", self.base_combo)
+
+        ext_row = QHBoxLayout()
+        self.ext_label = QLabel("(none — use manifest default)")
+        btn_ext = QPushButton("Choose external JSON...")
+        btn_ext.clicked.connect(self._pick_external_base)
+        ext_row.addWidget(self.ext_label, 1)
+        ext_row.addWidget(btn_ext)
+        form.addRow("External base:", ext_row)
+        layout.addLayout(form)
+
+        layout.addWidget(QLabel("Files declared in languages[]:"))
+        self.entry_list = QListWidget()
+        for entry in manifest.entries:
+            cond = f" [{entry.conditional}]" if entry.conditional else ""
+            suffix = " (HTTP - read-only)" if entry.is_http else (" (invalid)" if not entry.editable else "")
+            item = QListWidgetItem(f"{entry.lang} — {entry.path}{cond}{suffix}")
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            if entry.editable:
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Checked)
+            else:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            self.entry_list.addItem(item)
+        layout.addWidget(self.entry_list)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _pick_external_base(self) -> None:
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select reference JSON file",
+            str(self.manifest.package_root),
+            "JSON (*.json)",
+        )
+        if path_str:
+            self.external_base_path = Path(path_str)
+            self.ext_label.setText(self.external_base_path.name)
+
+    def selected_base_lang(self) -> str:
+        if self.external_base_path is not None:
+            return "en"
+        data = self.base_combo.currentData()
+        return str(data) if data else self.manifest.default_base_lang
+
+    def selected_entries(self) -> list[ManifestLangEntry]:
+        chosen: list[ManifestLangEntry] = []
+        for i in range(self.entry_list.count()):
+            item = self.entry_list.item(i)
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(entry, ManifestLangEntry) and entry.editable:
+                if item.checkState() == Qt.CheckState.Checked:
+                    chosen.append(entry)
+        return chosen
+
+
+def _clear_layout_widgets(layout: QLayout) -> None:
+    while layout.count():
+        item = layout.takeAt(0)
+        if item is not None:
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+
+class ExpandedEditorDialog(QDialog):
+    """Side-by-side Base x Translation editor (or editable Base editor) for Shift+F2."""
+
+    def __init__(
+        self,
+        base_text: str,
+        target_text: str,
+        key_path: str,
+        lang: str,
+        parent: QWidget | None = None,
+        custom_enrichers: list[CustomEnricherRule] | None = None,
+        glossary_entries: list[GlossaryEntry] | None = None,
+        *,
+        editable_base: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        mode_title = f"{lang} (Base)" if editable_base else lang
+        self.setWindowTitle(f"Expanded Editor — {key_path} ({mode_title})")
+        self.resize(820 if not editable_base else 680, 460)
+        self._base_text = base_text
+        self._key_path = key_path
+        self._lang = lang
+        self._editable_base = editable_base
+        self._custom_enrichers = list(custom_enrichers or [])
+        self._glossary_entries = list(glossary_entries or [])
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Key: {key_path} · Language: {mode_title}"))
+
+        self.token_strip = QWidget()
+        self.token_strip_layout = QHBoxLayout(self.token_strip)
+        self.token_strip_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.token_strip)
+
+        cols = QHBoxLayout()
+        self.base_view = QPlainTextEdit()
+        self.base_view.setReadOnly(True)
+        self.base_view.setPlainText(base_text)
+        TokenHighlighter(self.base_view.document(), custom_enrichers=self._custom_enrichers)
+        if not editable_base:
+            left_box = QVBoxLayout()
+            left_box.addWidget(QLabel("Reference (Base):"))
+            left_box.addWidget(self.base_view)
+            cols.addLayout(left_box, 1)
+
+        right_box = QVBoxLayout()
+        right_box.addWidget(
+            QLabel(f"Base ({lang}) — Source:" if editable_base else f"Translation ({lang}):")
+        )
+        self.target_edit = QPlainTextEdit()
+        self.target_edit.setPlainText(base_text if editable_base else target_text)
+        TokenHighlighter(self.target_edit.document(), custom_enrichers=self._custom_enrichers)
+        if not editable_base:
+            attach_ctrl_space_glossary_popup(
+                self.target_edit,
+                context_getter=lambda: GlossaryCellContext(
+                    base_text=self._base_text,
+                    lang=self._lang,
+                    entries=self._glossary_entries,
+                ),
+                custom_enrichers_getter=lambda: self._custom_enrichers,
+            )
+        self.target_edit.textChanged.connect(self._refresh_missing_strip)
+        right_box.addWidget(self.target_edit)
+
+        cols.addLayout(right_box, 1)
+        layout.addLayout(cols, 1)
+
+        self.live_alert_label = QLabel("")
+        self.live_alert_label.setWordWrap(True)
+        layout.addWidget(self.live_alert_label)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._refresh_missing_strip()
+        self.target_edit.setFocus()
+
+    def _insert_token_at_cursor(self, token: str) -> None:
+        cursor = self.target_edit.textCursor()
+        cursor.insertText(token)
+        self.target_edit.setTextCursor(cursor)
+        self.target_edit.setFocus()
+
+    def _refresh_missing_strip(self) -> None:
+        _clear_layout_widgets(self.token_strip_layout)
+        curr_text = self.target_edit.toPlainText()
+        if self._editable_base:
+            self.token_strip.setVisible(False)
+            issues = inspect_base_defects(curr_text, custom_enrichers=self._custom_enrichers)
+            if issues:
+                self.live_alert_label.setText(
+                    "Base notes: " + " | ".join(f"[{i.severity}] {i.message}" for i in issues)
+                )
+                self.live_alert_label.setStyleSheet("color: #1d4ed8;")
+            else:
+                self.live_alert_label.setText("No base issues.")
+                self.live_alert_label.setStyleSheet("color: #15803d;")
+            return
+
+        self.token_strip.setVisible(True)
+        missing = missing_tokens_for_translation(
+            self._base_text,
+            curr_text,
+            custom_enrichers=self._custom_enrichers,
+        )
+        if missing:
+            self.token_strip_layout.addWidget(QLabel("Insert missing:"))
+            for tok in missing[:10]:
+                btn = QPushButton(tok)
+                btn.clicked.connect(lambda _=False, t=tok: self._insert_token_at_cursor(t))
+                self.token_strip_layout.addWidget(btn)
+        self.token_strip_layout.addStretch()
+
+        issues = validate_translation(
+            self._key_path,
+            self._lang,
+            self._base_text,
+            curr_text,
+            custom_enrichers=self._custom_enrichers,
+        ) + lint_translation_glossary(
+            self._key_path,
+            self._lang,
+            self._base_text,
+            curr_text,
+            self._glossary_entries,
+            custom_enrichers=self._custom_enrichers,
+        )
+        if issues:
+            self.live_alert_label.setText(
+                "Alerts: " + " | ".join(f"[{i.severity}] {i.message}" for i in issues)
+            )
+            self.live_alert_label.setStyleSheet("color: #b91c1c;")
+        else:
+            self.live_alert_label.setText("No validation alerts.")
+            self.live_alert_label.setStyleSheet("color: #15803d;")
+
+    def edited_text(self) -> str:
+        return self.target_edit.toPlainText()
+
+
+class MainWindow(QMainWindow):
+    """Main desktop window displaying multilingual translation table and inspector."""
+
+    def __init__(self, app_data_dir: Path | None = None) -> None:
+        super().__init__()
+        self.setWindowTitle("i18n Reviewer")
+        self.resize(1360, 780)
+        self.app_data_dir = app_data_dir or default_app_data_dir()
+        self.session: PackageSession | None = None
+        self._project_unsaved: bool = False
+        self.lang_checkboxes: dict[str, QCheckBox] = {}
+        self._lang_actions: list[QAction] = []
+        self._validation_gen: int = 0
+        self._active_validation_workers: int = 0
+        self._global_glossary_cache: list[GlossaryEntry] = load_global_glossary(self.app_data_dir)
+        self.spell_service = SpellService(app_data_dir=self.app_data_dir)
+        self._table_glossary_popup: object | None = None
+        self._validation_signals = ValidationSignals(self)
+        self._validation_signals.batch_ready.connect(self._on_validation_batch_ready)
+        self._validation_signals.finished.connect(self._on_validation_finished)
+
+        self.undo_stack = QUndoStack(self)
+        self.table_model = TranslationTableModel(undo_stack=self.undo_stack)
+        self.proxy_model = PackageFilterProxyModel()
+        self.proxy_model.setSourceModel(self.table_model)
+
+        self.fs_watcher = QFileSystemWatcher(self)
+        self.fs_watcher.fileChanged.connect(lambda _: self.check_for_external_changes())
+
+        self.search_debounce = QTimer(self)
+        self.search_debounce.setSingleShot(True)
+        self.search_debounce.setInterval(150)
+        self.search_debounce.timeout.connect(self._apply_debounced_search)
+
+        self._build_toolbar()
+        self._build_central()
+        self._bind_shortcuts()
+        self.table_model.cell_edited.connect(self._on_cell_edited)
+        self.setStatusBar(QStatusBar())
+        self.statusBar().showMessage("Open a Foundry module.json or system.json to begin.")
+
+    def _build_toolbar(self) -> None:
+        self.toolbar = QToolBar("Main")
+        self.toolbar.setMovable(False)
+        self.addToolBar(self.toolbar)
+
+        self.open_action = QAction("New Project...", self)
+        self.open_action.triggered.connect(self._on_open_package_clicked)
+        self.toolbar.addAction(self.open_action)
+
+        self.open_proj_action = QAction("Open Project...", self)
+        self.open_proj_action.triggered.connect(self._on_open_project_clicked)
+        self.toolbar.addAction(self.open_proj_action)
+
+        self.save_proj_action = QAction("Save Project (Ctrl+S)", self)
+        self.save_proj_action.triggered.connect(lambda: self.save_project())
+        self.toolbar.addAction(self.save_proj_action)
+
+        undo_action = self.undo_stack.createUndoAction(self, "Undo")
+        undo_action.setShortcuts([QKeySequence(QKeySequence.StandardKey.Undo), QKeySequence("Ctrl+Z")])
+        redo_action = self.undo_stack.createRedoAction(self, "Redo")
+        redo_action.setShortcuts([QKeySequence(QKeySequence.StandardKey.Redo), QKeySequence("Ctrl+Y")])
+        self.undo_action = undo_action
+        self.redo_action = redo_action
+        self.toolbar.addAction(undo_action)
+        self.toolbar.addAction(redo_action)
+        self.toolbar.addSeparator()
+
+        self.toolbar.addWidget(QLabel(" Filter: "))
+        self.status_filter_combo = QComboBox()
+        self.status_filter_combo.addItem("All", "all")
+        self.status_filter_combo.addItem("Pending Only", "pending")
+        self.status_filter_combo.addItem("Edited Only", "edited")
+        self.status_filter_combo.addItem("All Alerts", "alerts")
+        self.status_filter_combo.addItem("Glossary Mismatches", "glossary")
+        self.status_filter_combo.currentIndexChanged.connect(self._on_status_filter_changed)
+        self.toolbar.addWidget(self.status_filter_combo)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search key or text (Ctrl+F)...")
+        self.search_input.setMaximumWidth(230)
+        self.search_input.textChanged.connect(lambda _: self.search_debounce.start())
+        self.toolbar.addWidget(self.search_input)
+
+        self.toolbar.addWidget(QLabel(" File: "))
+        self.file_filter_combo = QComboBox()
+        self.file_filter_combo.addItem("All files", None)
+        self.file_filter_combo.currentIndexChanged.connect(self._on_file_filter_changed)
+        self.toolbar.addWidget(self.file_filter_combo)
+
+        self.toolbar.addSeparator()
+        self.lang_anchor_action = self.toolbar.addSeparator()
+
+        spacer = QWidget()
+        spacer.setSizePolicy(
+            spacer.sizePolicy().horizontalPolicy().Expanding,
+            spacer.sizePolicy().verticalPolicy().Preferred,
+        )
+        self.toolbar.addWidget(spacer)
+
+        self.toggle_inspector_button = QPushButton("Inspector")
+        self.toggle_inspector_button.setCheckable(True)
+        self.toggle_inspector_button.setChecked(True)
+        self.toggle_inspector_button.clicked.connect(self._toggle_inspector)
+        self.toolbar.addWidget(self.toggle_inspector_button)
+
+        self.btn_custom_enrichers = QPushButton("Enricher Rules...")
+        self.btn_custom_enrichers.clicked.connect(self.open_custom_enrichers_dialog)
+        self.toolbar.addWidget(self.btn_custom_enrichers)
+
+        self.btn_glossary = QPushButton("Glossary...")
+        self.btn_glossary.clicked.connect(self.open_glossary_dialog)
+        self.toolbar.addWidget(self.btn_glossary)
+
+        self.btn_restore_backup = QPushButton("Restore Backup")
+        self.btn_restore_backup.clicked.connect(self.open_backup_dialog)
+        self.toolbar.addWidget(self.btn_restore_backup)
+
+        self.btn_publish = QPushButton("Send to Production")
+        self.btn_publish.setStyleSheet(
+            "QPushButton { background: #15803d; color: white; font-weight: bold; padding: 4px 10px; border-radius: 4px; }"
+        )
+        self.btn_publish.clicked.connect(self.publish_to_production)
+        self.toolbar.addWidget(self.btn_publish)
+
+    def _build_central(self) -> None:
+        container = QWidget()
+        root_layout = QVBoxLayout(container)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        self.diagnostic_banner = QLabel("")
+        self.diagnostic_banner.setWordWrap(True)
+        self.diagnostic_banner.setStyleSheet(
+            "QLabel { background: #fef3c7; color: #92400e; padding: 6px 10px; "
+            "border-bottom: 1px solid #f59e0b; font-weight: bold; }"
+        )
+        self.diagnostic_banner.setVisible(False)
+        root_layout.addWidget(self.diagnostic_banner)
+
+        self.external_change_banner = QFrame()
+        self.external_change_banner.setStyleSheet(
+            "QFrame { background: #dbeafe; border-bottom: 1px solid #3b82f6; padding: 4px 10px; }"
+        )
+        ext_layout = QHBoxLayout(self.external_change_banner)
+        ext_layout.setContentsMargins(6, 4, 6, 4)
+        self.external_change_label = QLabel("Package files were modified externally on disk.")
+        self.external_change_label.setStyleSheet("color: #1e3a8a; font-weight: bold;")
+        self.btn_sync_now = QPushButton("Sync now")
+        self.btn_sync_now.clicked.connect(self.sync_with_disk)
+        ext_layout.addWidget(self.external_change_label, 1)
+        ext_layout.addWidget(self.btn_sync_now)
+        self.external_change_banner.setVisible(False)
+        root_layout.addWidget(self.external_change_banner)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        self.table = QTableView()
+        self.table.setModel(self.proxy_model)
+        self.cell_delegate = StatusCellDelegate(
+            self.table,
+            custom_enrichers_getter=lambda: list(self.session.custom_enrichers) if self.session else [],
+            live_text_changed=self._on_inline_text_changed,
+            glossary_context_getter=self._glossary_context_for_index,
+        )
+        self.table.setItemDelegate(self.cell_delegate)
+        self.table.setWordWrap(True)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.table.verticalHeader().setMinimumSectionSize(44)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_context_menu)
+        self.table.selectionModel().currentChanged.connect(self._on_current_changed)
+
+        self.inspector_panel = QFrame()
+        self.inspector_panel.setMinimumWidth(300)
+        self.inspector_panel.setMaximumWidth(400)
+        self.inspector_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        pv = QVBoxLayout(self.inspector_panel)
+
+        self.inspector_key_label = QLabel("Select a cell")
+        self.inspector_key_label.setWordWrap(True)
+        self.inspector_key_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        self.inspector_origin_label = QLabel("")
+        self.inspector_origin_label.setWordWrap(True)
+        self.inspector_state_label = QLabel("")
+        self.inspector_state_label.setWordWrap(True)
+        self.inspector_stale_label = QLabel("")
+        self.inspector_stale_label.setWordWrap(True)
+        self.inspector_stale_label.setStyleSheet(
+            "background: #ede9fe; color: #4c1d95; padding: 6px; border-radius: 4px;"
+        )
+        self.inspector_stale_label.setVisible(False)
+        self.inspector_diag_label = QLabel("")
+        self.inspector_diag_label.setWordWrap(True)
+        self.inspector_actions_container = QWidget()
+        self.inspector_dynamic_layout = QVBoxLayout(self.inspector_actions_container)
+        self.inspector_dynamic_layout.setContentsMargins(0, 4, 0, 4)
+
+        self.btn_review_next = QPushButton("Mark Reviewed + Next (Ctrl+Enter)")
+        self.btn_review_next.clicked.connect(self.review_and_advance)
+        self.btn_next_pending = QPushButton("Next Pending (Ctrl+Down)")
+        self.btn_next_pending.clicked.connect(self.jump_to_next_pending)
+        self.btn_expanded_editor = QPushButton("Expanded Editor (Shift+F2)")
+        self.btn_expanded_editor.clicked.connect(self.open_expanded_editor)
+        self.btn_revert_cell = QPushButton("Revert to production")
+        self.btn_revert_cell.clicked.connect(self.revert_current_cell)
+        self.btn_orphan_delete = QPushButton("Remove orphan key...")
+        self.btn_orphan_delete.clicked.connect(self.toggle_orphan_deletion_current_cell)
+
+        pv.addWidget(self.inspector_key_label)
+        pv.addWidget(self.inspector_origin_label)
+        pv.addWidget(self.inspector_state_label)
+        pv.addWidget(self.inspector_stale_label)
+        pv.addWidget(self.inspector_diag_label)
+        pv.addWidget(self.inspector_actions_container)
+        pv.addStretch()
+        pv.addWidget(self.btn_review_next)
+        pv.addWidget(self.btn_next_pending)
+        pv.addWidget(self.btn_expanded_editor)
+        pv.addWidget(self.btn_revert_cell)
+        pv.addWidget(self.btn_orphan_delete)
+
+        splitter.addWidget(self.table)
+        splitter.addWidget(self.inspector_panel)
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 1)
+        root_layout.addWidget(splitter, 1)
+        self.setCentralWidget(container)
+
+    def _bind_shortcuts(self) -> None:
+        self.installEventFilter(self)
+        self.table.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
+            mods = event.modifiers()
+            key = event.key()
+            ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+            shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+
+            if ctrl and key == Qt.Key.Key_Space and watched is self.table:
+                self._open_table_glossary_popup()
+                return True
+            if ctrl and key == Qt.Key.Key_S:
+                self.save_project()
+                return True
+            if ctrl and key == Qt.Key.Key_F:
+                self.search_input.setFocus()
+                return True
+            if ctrl and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.review_and_advance()
+                return True
+            if ctrl and key == Qt.Key.Key_Down:
+                self.jump_to_next_pending()
+                return True
+            if shift and key == Qt.Key.Key_F2:
+                self.open_expanded_editor()
+                return True
+            if ctrl and not shift and key == Qt.Key.Key_Z and watched is self.table:
+                self.undo_stack.undo()
+                return True
+            if ctrl and key == Qt.Key.Key_Y and watched is self.table:
+                self.undo_stack.redo()
+                return True
+        return super().eventFilter(watched, event)
+
+    def _on_open_package_clicked(self) -> None:
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Foundry VTT manifest",
+            "",
+            "Foundry Manifest (module.json system.json);;JSON (*.json)",
+        )
+        if not path_str:
+            return
+        manifest = discover_manifest(Path(path_str))
+        dlg = OpenPackageDialog(manifest, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.open_package_manifest(
+                Path(path_str),
+                base_lang=dlg.selected_base_lang(),
+                selected_entries=dlg.selected_entries(),
+                base_external_path=dlg.external_base_path,
+            )
+
+    def _update_window_title(self) -> None:
+        if self.session is None:
+            self.setWindowTitle("i18n Reviewer")
+            return
+        star = " *" if self._project_unsaved else ""
+        self.setWindowTitle(f"i18n Reviewer — {self.session.manifest.package_id}{star}")
+
+    def _watch_session_files(self, session: PackageSession) -> None:
+        existing = self.fs_watcher.files()
+        if existing:
+            self.fs_watcher.removePaths(existing)
+        paths_to_watch: list[str] = []
+        for lf in session.files:
+            cand = resolve_loaded_file_path(session, lf)
+            if cand is not None and cand.exists():
+                paths_to_watch.append(str(cand))
+        if paths_to_watch:
+            self.fs_watcher.addPaths(paths_to_watch)
+
+    def _on_open_project_clicked(self) -> None:
+        default_dir = str(self.app_data_dir / "projects")
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open i18n Reviewer project",
+            default_dir,
+            "i18n Reviewer Project (*.i18nproj)",
+        )
+        if path_str:
+            self.open_project_file(Path(path_str))
+
+    def open_project_file(self, project_path: Path) -> bool:
+        try:
+            loaded = load_project_file(project_path)
+        except PackageNotFoundError:
+            ans = QMessageBox.question(
+                self,
+                "Package not found",
+                "The Foundry package folder could not be found. Would you like to relocate it now?",
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return False
+            reloc = QFileDialog.getExistingDirectory(self, "Relocate package folder")
+            if not reloc:
+                return False
+            try:
+                loaded = load_project_file(project_path, relocated_root=Path(reloc))
+            except PackageNotFoundError as exc:
+                QMessageBox.warning(self, "Invalid package", str(exc))
+                return False
+        except UnsupportedProjectVersionError as exc:
+            QMessageBox.critical(self, "Unsupported version", str(exc))
+            return False
+
+        session = loaded.session
+        if has_recovery_draft(session.project_id, self.app_data_dir):
+            ans = QMessageBox.question(
+                self,
+                "Draft recovery",
+                "An unsaved draft from a previous session was found. Would you like to restore it?",
+            )
+            if ans == QMessageBox.StandardButton.Yes:
+                loaded = load_project_file(
+                    project_path,
+                    relocated_root=session.manifest.package_root,
+                    apply_recovery_dir=self.app_data_dir,
+                )
+                session = loaded.session
+                self._project_unsaved = True
+            else:
+                clear_recovery_draft(session.project_id, self.app_data_dir)
+                self._project_unsaved = False
+        else:
+            self._project_unsaved = bool(loaded.sync_report.conflicts)
+
+        if loaded.sync_report.blocked_files:
+            QMessageBox.warning(
+                self,
+                "Files blocked during sync",
+                f"Missing or invalid files prevented a full sync: {', '.join(loaded.sync_report.blocked_files)}",
+            )
+
+        self.load_session(session, preserve_unsaved=self._project_unsaved)
+        if loaded.sync_report.conflicts:
+            if self._prompt_conflict_resolutions(session, loaded.sync_report.conflicts):
+                session.pending_conflict_keys.clear()
+                self._project_unsaved = True
+                self.table_model.set_session(session)
+                self._start_background_validation(session)
+                self._refresh_statusbar(session)
+                self._update_window_title()
+            else:
+                session.pending_conflict_keys = {
+                    (c.key_path, c.lang) for c in loaded.sync_report.conflicts
+                }
+        return True
+
+    def save_project(self, project_path: Path | None = None) -> bool:
+        if self.session is None:
+            return False
+        target = project_path or self.session.project_path
+        if target is None:
+            default_dir = self.app_data_dir / "projects"
+            default_dir.mkdir(parents=True, exist_ok=True)
+            suggested = str(default_dir / f"{self.session.manifest.package_id}.i18nproj")
+            path_str, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Project (.i18nproj)",
+                suggested,
+                "i18n Reviewer Project (*.i18nproj)",
+            )
+            if not path_str:
+                return False
+            target = Path(path_str)
+        save_project_file(self.session, target, app_data_dir=self.app_data_dir)
+        self._project_unsaved = False
+        self._update_window_title()
+        return True
+
+    def check_for_external_changes(self) -> None:
+        if self.session is None:
+            return
+        changed = check_external_disk_changes(self.session)
+        if changed:
+            self.external_change_label.setText(
+                f"External change detected in: {', '.join(changed)}"
+            )
+            self.external_change_banner.setVisible(True)
+        else:
+            self.external_change_banner.setVisible(False)
+
+    def sync_with_disk(self) -> None:
+        if self.session is None:
+            return
+        preview = prepare_disk_sync(self.session)
+        if preview.report.blocked_files:
+            QMessageBox.warning(
+                self,
+                "Sync blocked",
+                f"Could not sync because some files are missing or invalid: {', '.join(preview.report.blocked_files)}",
+            )
+            return
+        if preview.report.conflicts:
+            if not self._prompt_conflict_resolutions(preview.fresh_session, preview.report.conflicts):
+                self.session.pending_conflict_keys = {
+                    (c.key_path, c.lang) for c in preview.report.conflicts
+                }
+                return
+            self._project_unsaved = True
+        commit_sync_preview(self.session, preview)
+        self.load_session(self.session, preserve_unsaved=self._project_unsaved)
+        self.external_change_banner.setVisible(False)
+
+    def publish_to_production(self) -> bool:
+        if self.session is None:
+            return False
+        plan = prepare_publish_plan(self.session, app_data_dir=self.app_data_dir)
+        if plan.external_changes:
+            QMessageBox.warning(
+                self,
+                "External change detected",
+                "Package files changed on disk. Sync before sending to production.",
+            )
+            self.sync_with_disk()
+            return False
+        if not plan.file_plans:
+            QMessageBox.information(self, "Nothing to publish", "No edited cells or orphans marked.")
+            return False
+
+        dlg = PublishDialog(plan, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        chosen = dlg.selected_plans()
+        if not chosen:
+            return False
+
+        result = execute_publish_plan(self.session, chosen, app_data_dir=self.app_data_dir)
+        if result.failed_file is not None:
+            ans = QMessageBox.question(
+                self,
+                "Partial publish failure",
+                f"Failed to write '{result.failed_file}': {result.error}\n"
+                f"Files already written: {', '.join(result.published_files) or '(none)'}.\n\n"
+                "Would you like to immediately roll back the files already written in this batch?",
+            )
+            if ans == QMessageBox.StandardButton.Yes and result.batch_id is not None:
+                rollback_publish_batch(
+                    self.session,
+                    result.batch_id,
+                    rel_paths=result.published_files,
+                    app_data_dir=self.app_data_dir,
+                )
+            else:
+                commit_publish_result(self.session, result)
+
+        self._project_unsaved = True
+        write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
+        self.load_session(self.session, preserve_unsaved=True)
+        return result.failed_file is None
+
+    def open_backup_dialog(self) -> bool:
+        if self.session is None:
+            return False
+        dlg = BackupDialog(self.session.project_id, app_data_dir=self.app_data_dir, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        choice = dlg.restore_choice()
+        if choice is None:
+            return False
+        try:
+            restore_res = restore_backup(
+                self.session,
+                batch_id=choice.batch_id,
+                rel_paths=choice.rel_paths,
+                discard_local_drafts=choice.discard_local_drafts,
+                app_data_dir=self.app_data_dir,
+            )
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Error restoring backup", str(exc))
+            return False
+
+        preview = restore_res.sync_preview
+        if preview is not None:
+            if preview.report.blocked_files:
+                QMessageBox.warning(
+                    self,
+                    "Post-restore sync blocked",
+                    f"Blocked files while syncing restored state: {', '.join(preview.report.blocked_files)}",
+                )
+            elif preview.report.conflicts:
+                resolved = self._prompt_conflict_resolutions(
+                    preview.fresh_session,
+                    preview.report.conflicts,
+                )
+                pending = (
+                    set()
+                    if resolved
+                    else {(c.key_path, c.lang) for c in preview.report.conflicts}
+                )
+                commit_sync_preview(self.session, preview)
+                self.session.pending_conflict_keys = pending
+
+        self._project_unsaved = True
+        self.load_session(self.session, preserve_unsaved=True)
+        return True
+
+    def _prompt_conflict_resolutions(
+        self,
+        target_session: PackageSession,
+        conflicts: list[SyncConflict],
+    ) -> bool:
+        if not conflicts:
+            return True
+        dlg = ConflictResolutionDialog(conflicts, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        apply_conflict_resolutions(target_session, dlg.resolutions())
+        return True
+
+    def changeEvent(self, event: QEvent) -> None:
+        if event.type() == QEvent.Type.WindowActivate:
+            self.check_for_external_changes()
+        super().changeEvent(event)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.session is not None and self._project_unsaved:
+            ans = QMessageBox.question(
+                self,
+                "Unsaved changes",
+                "There are unsaved changes in the project (.i18nproj). Save before closing?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+            )
+            if ans == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+            if ans == QMessageBox.StandardButton.Save:
+                if not self.save_project():
+                    event.ignore()
+                    return
+        self._validation_gen += 1
+        if self.session is not None:
+            clear_recovery_draft(self.session.project_id, self.app_data_dir)
+        super().closeEvent(event)
+
+    def open_package_manifest(
+        self,
+        manifest_path: Path,
+        base_lang: str | None = None,
+        selected_entries: list[ManifestLangEntry] | None = None,
+        base_external_path: Path | None = None,
+    ) -> PackageSession:
+        manifest = discover_manifest(manifest_path)
+        session = load_package_session(
+            manifest,
+            base_lang=base_lang,
+            selected_entries=selected_entries,
+            base_external_path=base_external_path,
+        )
+        self._project_unsaved = False
+        self.load_session(session)
+        return session
+
+    def load_session(self, session: PackageSession, preserve_unsaved: bool = False) -> None:
+        self.session = session
+        self._global_glossary_cache = load_global_glossary(self.app_data_dir)
+        if not preserve_unsaved:
+            self._project_unsaved = False
+        self.undo_stack.clear()
+        self.cell_delegate.invalidate_cache()
+        self.table_model.set_session(session)
+        self._refresh_spell_header_statuses(session, open_dicts=False)
+        self._update_window_title()
+        self._watch_session_files(session)
+        self.external_change_banner.setVisible(False)
+
+        self.table.setColumnWidth(0, 230)
+        self.table.setColumnWidth(1, 260)
+        for col in range(2, 2 + len(session.target_langs)):
+            self.table.setColumnWidth(col, 240)
+            self.table.setColumnHidden(col, False)
+
+        self._rebuild_language_checkboxes(session.target_langs)
+        self._rebuild_file_filter(session)
+        self._refresh_diagnostics_banner(session)
+        self._refresh_statusbar(session)
+
+        if self.proxy_model.rowCount() > 0:
+            col = 2 if session.target_langs else 1
+            self.table.setCurrentIndex(self.proxy_model.index(0, col))
+        self._start_background_validation(session)
+
+    def _rebuild_language_checkboxes(self, target_langs: list[str]) -> None:
+        for action in self._lang_actions:
+            self.toolbar.removeAction(action)
+        self._lang_actions.clear()
+        self.lang_checkboxes.clear()
+
+        for col_offset, lang in enumerate(target_langs, start=2):
+            cb = QCheckBox(lang)
+            cb.setChecked(True)
+            cb.toggled.connect(
+                lambda checked, c=col_offset: self.table.setColumnHidden(c, not checked)
+            )
+            action = self.toolbar.insertWidget(self.lang_anchor_action, cb)
+            self.lang_checkboxes[lang] = cb
+            self._lang_actions.append(action)
+
+    def _rebuild_file_filter(self, session: PackageSession) -> None:
+        self.file_filter_combo.blockSignals(True)
+        self.file_filter_combo.clear()
+        self.file_filter_combo.addItem("All files", None)
+        for lf in session.files:
+            self.file_filter_combo.addItem(f"{lf.lang}: {lf.rel_path}", lf.rel_path)
+        self.file_filter_combo.setCurrentIndex(0)
+        self.file_filter_combo.blockSignals(False)
+        self.proxy_model.set_file_filter(None)
+
+    def _refresh_diagnostics_banner(self, session: PackageSession) -> None:
+        if not session.warnings and not session.file_diagnostics:
+            self.diagnostic_banner.setVisible(False)
+            self.diagnostic_banner.setText("")
+            return
+        lines: list[str] = []
+        for w in session.warnings[:4]:
+            path_part = f" ({w.path})" if w.path else ""
+            lines.append(f"[{w.kind}]{path_part} {w.message}")
+        if len(session.warnings) > 4:
+            lines.append(f"... and {len(session.warnings) - 4} more warning(s).")
+        self.diagnostic_banner.setText(" | ".join(lines))
+        self.diagnostic_banner.setVisible(True)
+
+    def _refresh_statusbar(self, session: PackageSession) -> None:
+        total_keys = len(session.rows)
+        reviewed_count = sum(
+            1 for r in session.rows for c in r.cells.values() if c.review_status == "reviewed"
+        )
+        dirty_count = sum(
+            1 for r in session.rows for c in r.cells.values() if c.is_dirty
+        ) + sum(1 for r in session.rows if r.base_cell is not None and r.base_cell.is_dirty)
+        missing_count = sum(
+            1 for r in session.rows for c in r.cells.values() if c.is_missing
+        )
+        orphan_count = sum(
+            1 for r in session.rows for c in r.cells.values() if c.kind == CellKind.ORPHAN
+        )
+        diag_count = len(session.warnings) + sum(len(v) for v in session.file_diagnostics.values())
+        self.statusBar().showMessage(
+            f"{total_keys} keys · {reviewed_count} reviewed · {dirty_count} edited · "
+            f"{missing_count} missing · {orphan_count} orphans · {diag_count} warnings/errors"
+        )
+
+    def _on_status_filter_changed(self) -> None:
+        mode = cast(StatusFilterMode, self.status_filter_combo.currentData() or "all")
+        self.proxy_model.set_status_filter(mode)
+
+    def _apply_debounced_search(self) -> None:
+        self.proxy_model.set_search_query(self.search_input.text())
+
+    def _on_file_filter_changed(self) -> None:
+        self.proxy_model.set_file_filter(self.file_filter_combo.currentData())
+
+    def _toggle_inspector(self, checked: bool) -> None:
+        self.inspector_panel.setVisible(checked)
+
+    def _current_source_pos(self) -> tuple[int, int] | None:
+        cur = self.table.currentIndex()
+        if not cur.isValid():
+            return None
+        src = self.proxy_model.mapToSource(cur)
+        if not src.isValid():
+            return None
+        return src.row(), src.column()
+
+    def mark_current_reviewed(self) -> bool:
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2:
+            return False
+        row, col = pos
+        cell = self.table_model.get_cell(row, col)
+        if cell is None or not cell.can_mark_reviewed():
+            return False
+        self.undo_stack.push(
+            ReviewCellCommand(cell, row, col, self.table_model.notify_cell_changed)
+        )
+        return True
+
+    def review_and_advance(self) -> None:
+        self.mark_current_reviewed()
+        self.jump_to_next_pending()
+
+    def jump_to_next_pending(self) -> None:
+        current_index = self.table.currentIndex()
+        row_count = self.proxy_model.rowCount()
+        if row_count == 0 or not self.table_model.target_langs:
+            return
+        start_col = current_index.column() if current_index.isValid() and current_index.column() >= 2 else 2
+        start_row = (current_index.row() + 1) if current_index.isValid() else 0
+
+        # Procura primeiro na coluna atual; se não houver pendentes, busca nas demais colunas visíveis
+        visible_cols = [
+            c for c in range(2, self.table_model.columnCount()) if not self.table.isColumnHidden(c)
+        ]
+        ordered_cols = [start_col] + [c for c in visible_cols if c != start_col]
+
+        for col_offset, col in enumerate(ordered_cols):
+            begin_row = start_row if col_offset == 0 else 0
+            for offset in range(row_count):
+                row_idx = (begin_row + offset) % row_count
+                proxy_index = self.proxy_model.index(row_idx, col)
+                source_index = self.proxy_model.mapToSource(proxy_index)
+                cell = self.table_model.get_cell(source_index.row(), col)
+                if cell is not None and cell.is_pending:
+                    self.table.setCurrentIndex(proxy_index)
+                    self.table.scrollTo(proxy_index)
+                    return
+
+    def revert_current_cell(self) -> None:
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 1:
+            return
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        if row_data is None or cell is None or not cell.is_dirty:
+            return
+        if col == 1:
+            self.undo_stack.push(
+                RevertBaseCellCommand(row_data, row, col, self.table_model.notify_row_changed)
+            )
+            return
+        self.undo_stack.push(
+            RevertCellCommand(cell, row_data.base_text, row, col, self.table_model.notify_cell_changed)
+        )
+
+    def toggle_orphan_deletion_current_cell(self) -> None:
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2:
+            return
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        if row_data is None or cell is None or cell.readonly or cell.kind != CellKind.ORPHAN:
+            return
+        target_flag = not cell.marked_for_deletion
+        prompt = (
+            f"Mark orphan key '{row_data.key_path}' for removal on the next publish to production?"
+            if target_flag
+            else f"Cancel removal of orphan key '{row_data.key_path}'?"
+        )
+        ans = QMessageBox.question(self, "Remove orphan key", prompt)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self.undo_stack.push(
+            ToggleOrphanDeletionCommand(cell, target_flag, row, col, self.table_model.notify_cell_changed)
+        )
+
+    def open_expanded_editor(self) -> None:
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 1 or self.session is None:
+            return
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        if row_data is None or cell is None or not cell.can_edit():
+            return
+        if col == 1:
+            dlg = ExpandedEditorDialog(
+                cell.local_value or "",
+                cell.local_value or "",
+                row_data.key_path,
+                self.session.base_lang,
+                self,
+                custom_enrichers=self.session.custom_enrichers,
+                glossary_entries=self.merged_glossary(),
+                editable_base=True,
+            )
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                new_val = dlg.edited_text()
+                if cell.will_apply_edit(new_val):
+                    self.undo_stack.push(
+                        EditBaseCellCommand(
+                            row_data=row_data,
+                            new_value=new_val,
+                            row=row,
+                            col=col,
+                            notify_row=self.table_model.notify_row_changed,
+                        )
+                    )
+            return
+
+        lang = self.session.target_langs[col - 2]
+        dlg = ExpandedEditorDialog(
+            row_data.base_text or "",
+            cell.local_value or "",
+            row_data.key_path,
+            lang,
+            self,
+            custom_enrichers=self.session.custom_enrichers,
+            glossary_entries=self.merged_glossary(),
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_val = dlg.edited_text()
+            if cell.will_apply_edit(new_val):
+                self.undo_stack.push(
+                    EditCellCommand(
+                        cell=cell,
+                        base_text=row_data.base_text,
+                        new_value=new_val,
+                        row=row,
+                        col=col,
+                        notify=self.table_model.notify_cell_changed,
+                    )
+                )
+
+    def _on_context_menu(self, pos: object) -> None:
+        from PySide6.QtCore import QPoint
+
+        if not isinstance(pos, QPoint):
+            return
+        proxy_index = self.table.indexAt(pos)
+        if not proxy_index.isValid():
+            return
+        self.table.setCurrentIndex(proxy_index)
+        source_index = self.proxy_model.mapToSource(proxy_index)
+        if not source_index.isValid() or source_index.column() < 1:
+            return
+        row_data = self.table_model.get_row(source_index.row())
+        cell = self.table_model.get_cell(source_index.row(), source_index.column())
+        if row_data is None or cell is None:
+            return
+        menu = self._build_cell_context_menu(row_data, cell, source_index.column())
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _column_lang(self, source_col: int) -> str | None:
+        if self.session is None or source_col < 1:
+            return None
+        if source_col == 1:
+            return self.session.base_lang
+        idx = source_col - 2
+        if 0 <= idx < len(self.session.target_langs):
+            return self.session.target_langs[idx]
+        return None
+
+    def _base_spell_text_for_row(
+        self,
+        row_data: TableRowData,
+        draft_text: str | None = None,
+    ) -> str | None:
+        base_cell = row_data.base_cell
+        if base_cell is None:
+            return row_data.base_text if draft_text is None else draft_text
+        if base_cell.kind in (CellKind.MISSING, CellKind.NON_STRING):
+            return None
+        return base_cell.local_value if draft_text is None else draft_text
+
+    def _append_alert_ignore_actions(
+        self,
+        menu: QMenu,
+        alert_items: list[tuple[str, bool]],
+    ) -> None:
+        for rule_id, is_ignored in alert_items:
+            action_label = (
+                f"Re-enable alert ({rule_id})"
+                if is_ignored
+                else f"Ignore this alert ({rule_id})..."
+            )
+            act_ig = menu.addAction(action_label)
+
+            def _make_ig(rid: str) -> Callable[[bool], None]:
+                def _handler(_checked: bool = False) -> None:
+                    self.toggle_ignore_warning_current(rid)
+
+                return _handler
+
+            act_ig.triggered.connect(_make_ig(rule_id))
+
+    def _append_spell_menu_actions(
+        self,
+        menu: QMenu,
+        cell: CellData,
+        lang: str,
+    ) -> None:
+        if not cell.active_spell_issues:
+            return
+        menu.addSeparator()
+        for s_issue in cell.active_spell_issues[:4]:
+            if not s_issue.missing_tokens:
+                continue
+            bad_word = s_issue.missing_tokens[0]
+            for sugg in self.spell_service.suggest(lang, bad_word, limit=4):
+                act_fix = menu.addAction(f"Fix '{bad_word}' → '{sugg}'")
+
+                def _make_fix(bw: str, rep: str) -> Callable[[bool], None]:
+                    def _handler(_checked: bool = False) -> None:
+                        self.replace_spell_word_for_current(bw, rep)
+
+                    return _handler
+
+                act_fix.triggered.connect(_make_fix(bad_word, sugg))
+            act_pwl = menu.addAction(f"Add '{bad_word}' to dictionary")
+
+            def _make_pwl(bw: str) -> Callable[[bool], None]:
+                def _handler(_checked: bool = False) -> None:
+                    self.add_personal_word_current(bw)
+
+                return _handler
+
+            act_pwl.triggered.connect(_make_pwl(bad_word))
+
+    def _build_cell_context_menu(
+        self,
+        row_data: TableRowData,
+        cell: CellData,
+        source_col: int,
+    ) -> QMenu:
+        menu = QMenu(self)
+        if cell.is_base_cell:
+            if cell.can_edit():
+                menu.addAction("Expanded Editor (Shift+F2)...", self.open_expanded_editor)
+            if cell.is_dirty:
+                menu.addAction("Revert to production", self.revert_current_cell)
+            _, base_alerts = self._cell_validation_action_specs(row_data, cell)
+            if base_alerts:
+                menu.addSeparator()
+                self._append_alert_ignore_actions(menu, base_alerts)
+            if self.session is not None and cell.can_edit():
+                menu.addSeparator()
+                self._append_spell_menu_actions(menu, cell, self.session.base_lang)
+            return menu
+
+        menu.addAction("Mark as Reviewed", self.mark_current_reviewed)
+        menu.addAction("Mark Reviewed + Next (Ctrl+Enter)", self.review_and_advance)
+        menu.addAction("Expanded Editor (Shift+F2)...", self.open_expanded_editor)
+        if cell.is_dirty:
+            menu.addAction("Revert to production", self.revert_current_cell)
+        if cell.kind == CellKind.ORPHAN and not cell.readonly:
+            label = "Cancel orphan removal" if cell.marked_for_deletion else "Remove orphan key..."
+            menu.addAction(label, self.toggle_orphan_deletion_current_cell)
+
+        missing_toks, alert_items = self._cell_validation_action_specs(row_data, cell)
+        if missing_toks or alert_items:
+            menu.addSeparator()
+            for tok in missing_toks[:8]:
+                act_ins = menu.addAction(f"Insert missing token: {tok}")
+
+                def _make_ins(token: str) -> Callable[[bool], None]:
+                    def _handler(_checked: bool = False) -> None:
+                        self.insert_missing_token_for_current(token)
+
+                    return _handler
+
+                act_ins.triggered.connect(_make_ins(tok))
+            self._append_alert_ignore_actions(menu, alert_items)
+
+        # 3rd section: glossary (apply preferred translation / add term)
+        if self.session is not None and cell.can_edit():
+            lang = self.session.target_langs[source_col - 2]
+            merged = self.merged_glossary()
+            matches = detect_base_glossary_matches(
+                row_data.base_text,
+                merged,
+                custom_enrichers=self.session.custom_enrichers,
+            )
+            menu.addSeparator()
+            for entry in matches[:6]:
+                pref = entry.preferred_translation(lang)
+                if pref is None:
+                    continue
+                act_pref = menu.addAction(f"Apply glossary: {entry.term} → {pref}")
+
+                def _make_pref(val: str) -> Callable[[bool], None]:
+                    def _handler(_checked: bool = False) -> None:
+                        self.insert_missing_token_for_current(val)
+
+                    return _handler
+
+                act_pref.triggered.connect(_make_pref(pref))
+
+            focus_w = self.table.focusWidget()
+            selected_txt = (
+                focus_w.textCursor().selectedText().replace("\u2029", " ").strip()
+                if isinstance(focus_w, QPlainTextEdit)
+                else ""
+            )
+            prefill_term = selected_txt or (row_data.base_text or "").strip()[:60]
+            prefill_trans = "" if selected_txt else (cell.local_value or "").strip()[:80]
+
+            def _open_add_term(_checked: bool = False) -> None:
+                self.open_glossary_dialog(
+                    prefill_term=prefill_term,
+                    prefill_translation=prefill_trans,
+                    prefill_lang=lang,
+                )
+
+            act_add_gloss = menu.addAction("Add term to glossary...")
+            act_add_gloss.triggered.connect(_open_add_term)
+
+            # 4th section: on-demand spell suggestions + add to global PWL
+            self._append_spell_menu_actions(menu, cell, lang)
+
+        return menu
+
+    def _open_table_glossary_popup(self) -> None:
+        """Open Ctrl+Space glossary popup directly over a selected table cell when no inline editor is active."""
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2 or self.session is None:
+            return
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        if row_data is None or cell is None or not cell.can_edit():
+            return
+        lang = self.session.target_langs[col - 2]
+        cur_idx = self.table.currentIndex()
+        rect = self.table.visualRect(cur_idx)
+        global_pos = self.table.viewport().mapToGlobal(rect.bottomLeft())
+
+        def _apply_from_table(chosen: str) -> None:
+            if cell.is_missing or not (cell.local_value or "").strip():
+                if cell.will_apply_edit(chosen):
+                    self.undo_stack.push(
+                        EditCellCommand(
+                            cell=cell,
+                            base_text=row_data.base_text,
+                            new_value=chosen,
+                            row=row,
+                            col=col,
+                            notify=self.table_model.notify_cell_changed,
+                        )
+                    )
+            else:
+                self.insert_missing_token_for_current(chosen)
+
+        self._table_glossary_popup = open_glossary_popup_at(
+            self.table,
+            global_pos,
+            base_text=row_data.base_text or "",
+            lang=lang,
+            entries=self.merged_glossary(),
+            custom_enrichers=self.session.custom_enrichers,
+            on_selected=_apply_from_table,
+        )
+
+    def merged_glossary(self) -> list[GlossaryEntry]:
+        """Return merged Global (cached) + Project glossary entries for the active session."""
+        project_entries = self.session.project_glossary if self.session is not None else []
+        return merge_glossaries(self._global_glossary_cache, project_entries)
+
+    def revalidate_session(self, *, refresh_global: bool = False) -> None:
+        """Re-run asynchronous validation and glossary linting for the active session."""
+        if refresh_global:
+            self._global_glossary_cache = load_global_glossary(self.app_data_dir)
+        if self.session is not None:
+            self._start_background_validation(self.session)
+
+    def _glossary_context_for_index(
+        self,
+        index: QModelIndex | QPersistentModelIndex,
+    ) -> GlossaryCellContext:
+        if self.session is None or not index.isValid():
+            return GlossaryCellContext(base_text="", lang="", entries=[])
+        src = self.proxy_model.mapToSource(index)
+        if not src.isValid() or src.column() < 2:
+            return GlossaryCellContext(base_text="", lang="", entries=[])
+        row_data = self.table_model.get_row(src.row())
+        lang = self.session.target_langs[src.column() - 2]
+        return GlossaryCellContext(
+            base_text=row_data.base_text or "" if row_data else "",
+            lang=lang,
+            entries=self.merged_glossary(),
+        )
+
+    def open_glossary_dialog(
+        self,
+        *,
+        prefill_term: str = "",
+        prefill_translation: str = "",
+        prefill_lang: str = "",
+    ) -> bool:
+        """Open two-level glossary management dialog and revalidate session if saved."""
+        self._global_glossary_cache = load_global_glossary(self.app_data_dir)
+        project_entries = list(self.session.project_glossary) if self.session is not None else []
+        target_langs = list(self.session.target_langs) if self.session is not None else ["pt-BR"]
+        dlg = GlossaryDialog(
+            global_entries=self._global_glossary_cache,
+            project_entries=project_entries,
+            target_langs=target_langs,
+            prefill_term=prefill_term,
+            prefill_translation=prefill_translation,
+            prefill_lang=prefill_lang,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        save_global_glossary(dlg.global_entries(), app_data_dir=self.app_data_dir)
+        self._global_glossary_cache = dlg.global_entries()
+        if self.session is not None:
+            self.session.project_glossary = dlg.project_entries()
+            self._project_unsaved = True
+            self._update_window_title()
+            write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
+            self.revalidate_session()
+        return True
+
+    def _cell_validation_action_specs(
+        self,
+        row_data: TableRowData,
+        cell: CellData,
+    ) -> tuple[list[str], list[tuple[str, bool]]]:
+        custom_rules = self.session.custom_enrichers if self.session else []
+        missing_toks = (
+            missing_tokens_for_translation(
+                row_data.base_text,
+                cell.local_value,
+                custom_enrichers=custom_rules,
+            )
+            if (not cell.is_base_cell and cell.can_edit())
+            else []
+        )
+        alert_items = [(issue.rule_id, issue.is_ignored) for issue in cell.all_validation_issues]
+        return missing_toks, alert_items
+
+    @property
+    def validation_in_progress(self) -> bool:
+        """True while background QThreadPool validation workers are still active."""
+        return self._active_validation_workers > 0
+
+    def _visible_source_row_indices(self, total_rows: int) -> list[int]:
+        if total_rows == 0:
+            return []
+        top_proxy = max(0, self.table.rowAt(0))
+        bottom_proxy = self.table.rowAt(max(0, self.table.viewport().height() - 1))
+        if bottom_proxy < top_proxy:
+            bottom_proxy = min(self.proxy_model.rowCount() - 1, top_proxy + 40)
+        ordered: list[int] = []
+        seen: set[int] = set()
+        for prow in range(top_proxy, min(self.proxy_model.rowCount(), bottom_proxy + 1)):
+            srow = self.proxy_model.mapToSource(self.proxy_model.index(prow, 0)).row()
+            if 0 <= srow < total_rows and srow not in seen:
+                seen.add(srow)
+                ordered.append(srow)
+        return ordered
+
+    def _start_background_validation(self, session: PackageSession) -> None:
+        self._validation_gen += 1
+        gen = self._validation_gen
+        total = len(session.rows)
+        if total == 0:
+            self._active_validation_workers = 0
+            return
+
+        visible_idxs = self._visible_source_row_indices(total)
+        visible_set = set(visible_idxs)
+        rest_idxs = [i for i in range(total) if i not in visible_set]
+        ordered_idxs = visible_idxs + rest_idxs
+
+        snapshots: list[RowValidationSnapshot] = []
+        for idx in ordered_idxs:
+            r = session.rows[idx]
+            snapshots.append(
+                RowValidationSnapshot(
+                    row_index=idx,
+                    key_path=r.key_path,
+                    base_text=r.base_text,
+                    base_spell_text=self._base_spell_text_for_row(r),
+                    cell_states={lang: (c.local_value, c.is_dirty) for lang, c in r.cells.items()},
+                )
+            )
+
+        def _is_cancelled() -> bool:
+            return gen != self._validation_gen
+
+        self._active_validation_workers = 1
+        worker = ValidationRunnable(
+            generation=gen,
+            is_cancelled=_is_cancelled,
+            ordered_snapshots=snapshots,
+            visible_count=len(visible_idxs),
+            custom_enrichers=list(session.custom_enrichers),
+            ignored_warnings=list(session.ignored_warnings),
+            glossary_entries=self.merged_glossary(),
+            spell_service=self.spell_service,
+            signals=self._validation_signals,
+            base_lang=session.base_lang,
+        )
+        QThreadPool.globalInstance().start(worker, 5)
+
+    def _on_validation_batch_ready(
+        self,
+        gen: int,
+        batch: list[RowValidationResult],
+    ) -> None:
+        if gen != self._validation_gen or self.session is None:
+            return
+        rows = self.session.rows
+        for item in batch:
+            if 0 <= item.row_index < len(rows):
+                row_data = rows[item.row_index]
+                row_data.base_issues = item.base_issues
+                if row_data.base_cell is not None:
+                    row_data.base_cell.spell_issues = item.base_spell_issues
+                for lang, issues in item.cell_validation_issues.items():
+                    cell = row_data.cells.get(lang)
+                    if cell is not None:
+                        cell.validation_issues = issues
+                for lang, g_issues in item.cell_glossary_issues.items():
+                    cell = row_data.cells.get(lang)
+                    if cell is not None:
+                        cell.glossary_issues = g_issues
+                for lang, s_issues in item.cell_spell_issues.items():
+                    cell = row_data.cells.get(lang)
+                    if cell is not None:
+                        cell.spell_issues = s_issues
+        self.table.viewport().update()
+        if self.proxy_model.status_filter in ("alerts", "glossary"):
+            self.proxy_model.invalidateFilter()
+
+    def _refresh_spell_header_statuses(
+        self,
+        session: PackageSession,
+        *,
+        open_dicts: bool = True,
+    ) -> None:
+        missing_langs: set[str] = set()
+        missing_tips: dict[str, str] = {}
+        langs_to_check = [session.base_lang, *session.target_langs] if session.base_lang else list(session.target_langs)
+        for lang in langs_to_check:
+            st = self.spell_service.status_for(lang, open_dict=open_dicts)
+            if not st.available:
+                missing_langs.add(lang)
+                missing_tips[lang] = st.message
+        if (
+            missing_langs != self.table_model.missing_spell_langs
+            or missing_tips != self.table_model.missing_spell_tooltips
+        ):
+            self.table_model.missing_spell_langs = missing_langs
+            self.table_model.missing_spell_tooltips = missing_tips
+            self.table_model.headerDataChanged.emit(
+                Qt.Orientation.Horizontal,
+                1,
+                max(1, 1 + len(session.target_langs)),
+            )
+
+    def _on_validation_finished(self, gen: int) -> None:
+        if gen != self._validation_gen:
+            return
+        self._active_validation_workers = max(0, self._active_validation_workers - 1)
+        if self._active_validation_workers == 0 and self.session is not None:
+            self._refresh_spell_header_statuses(self.session, open_dicts=True)
+            self._refresh_statusbar(self.session)
+            self._sync_inspector_to_current(include_spell_suggestions=False)
+
+    def _evaluate_cell_all(
+        self,
+        row_data: TableRowData,
+        cell: CellData,
+        lang: str,
+        target_text: str | None,
+        *,
+        ignore_empty: bool,
+        glossary: list[GlossaryEntry],
+    ) -> None:
+        if self.session is None:
+            return
+        cell.validation_issues = validate_translation(
+            row_data.key_path,
+            lang,
+            row_data.base_text,
+            target_text,
+            custom_enrichers=self.session.custom_enrichers,
+            ignored_warnings=self.session.ignored_warnings,
+            ignore_empty=ignore_empty,
+        )
+        cell.glossary_issues = lint_translation_glossary(
+            row_data.key_path,
+            lang,
+            row_data.base_text,
+            target_text,
+            glossary,
+            custom_enrichers=self.session.custom_enrichers,
+            ignored_warnings=self.session.ignored_warnings,
+        )
+        cell.spell_issues = self.spell_service.lint_cell_spelling(
+            row_data.key_path,
+            lang,
+            row_data.base_text,
+            target_text,
+            glossary_entries=glossary,
+            custom_enrichers=self.session.custom_enrichers,
+            ignored_warnings=self.session.ignored_warnings,
+        )
+
+    def _evaluate_base_row(
+        self,
+        row_data: TableRowData,
+        text_for_defects: str | None,
+        text_for_spell: str | None,
+        glossary: list[GlossaryEntry],
+    ) -> None:
+        if self.session is None:
+            return
+        row_data.base_issues = inspect_base_defects(
+            text_for_defects,
+            custom_enrichers=self.session.custom_enrichers,
+        )
+        if row_data.base_cell is not None:
+            row_data.base_cell.spell_issues = self.spell_service.lint_cell_spelling(
+                row_data.key_path,
+                self.session.base_lang,
+                None,
+                text_for_spell,
+                glossary_entries=glossary,
+                custom_enrichers=self.session.custom_enrichers,
+                ignored_warnings=self.session.ignored_warnings,
+            )
+
+    def _validate_row_sync(self, source_row: int) -> None:
+        if self.session is None or not (0 <= source_row < len(self.session.rows)):
+            return
+        row_data = self.session.rows[source_row]
+        glossary = self.merged_glossary()
+        spell_text = self._base_spell_text_for_row(row_data)
+        self._evaluate_base_row(row_data, row_data.base_text, spell_text, glossary)
+        for lang, cell in row_data.cells.items():
+            self._evaluate_cell_all(
+                row_data,
+                cell,
+                lang,
+                cell.local_value,
+                ignore_empty=not cell.is_dirty,
+                glossary=glossary,
+            )
+        if self.proxy_model.status_filter in ("alerts", "glossary"):
+            self.proxy_model.invalidateFilter()
+
+    def _on_inline_text_changed(self, target_cell: CellData, draft_text: str) -> None:
+        """Revalidate an actively edited inline cell synchronously per keystroke."""
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 1 or self.session is None:
+            return
+        row_data = self.table_model.get_row(pos[0])
+        cell = self.table_model.get_cell(pos[0], pos[1])
+        lang = self._column_lang(pos[1])
+        if row_data is None or cell is not target_cell or lang is None:
+            return
+        glossary = self.merged_glossary()
+        if pos[1] == 1:
+            spell_text = self._base_spell_text_for_row(row_data, draft_text=draft_text)
+            self._evaluate_base_row(row_data, draft_text, spell_text, glossary)
+            self.table.viewport().update()
+            self._refresh_inspector_diagnostics(
+                row_data,
+                cell,
+                lang,
+                live_text=draft_text,
+                include_spell_suggestions=False,
+            )
+            return
+        self._evaluate_cell_all(
+            row_data,
+            cell,
+            lang,
+            draft_text,
+            ignore_empty=(draft_text == cell.prod_value and not cell.is_dirty),
+            glossary=glossary,
+        )
+        self.table.viewport().update()
+        self._refresh_inspector_diagnostics(
+            row_data,
+            cell,
+            lang,
+            live_text=draft_text,
+            include_spell_suggestions=False,
+        )
+
+    def replace_spell_word_for_current(self, bad_word: str, replacement: str) -> bool:
+        """Replace a misspelled word in unmasked prose of the current cell via QUndoStack."""
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 1 or self.session is None:
+            return False
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        if row_data is None or cell is None or not cell.can_edit() or not cell.local_value:
+            return False
+        masked = mask_technical_spans(cell.local_value, custom_enrichers=self.session.custom_enrichers)
+        match = term_boundary_pattern(bad_word).search(masked)
+        if match is None:
+            return False
+        orig = cell.local_value
+        new_val = orig[: match.start()] + replacement + orig[match.end() :]
+        if not cell.will_apply_edit(new_val):
+            return False
+        if col == 1:
+            self.undo_stack.push(
+                EditBaseCellCommand(
+                    row_data=row_data,
+                    new_value=new_val,
+                    row=row,
+                    col=col,
+                    notify_row=self.table_model.notify_row_changed,
+                )
+            )
+            return True
+        self.undo_stack.push(
+            EditCellCommand(
+                cell=cell,
+                base_text=row_data.base_text,
+                new_value=new_val,
+                row=row,
+                col=col,
+                notify=self.table_model.notify_cell_changed,
+            )
+        )
+        return True
+
+    def add_personal_word_current(self, word: str) -> bool:
+        """Add word to global PWL for the current column's language and revalidate session cells."""
+        pos = self._current_source_pos()
+        if pos is None or self.session is None:
+            return False
+        row, col = pos
+        lang = self._column_lang(col)
+        if lang is None:
+            return False
+        if not self.spell_service.add_personal(lang, word):
+            return False
+        self._validate_row_sync(row)
+        self.revalidate_session()
+        return True
+
+    def insert_missing_token_for_current(self, token: str) -> bool:
+        """Insert a missing protected token at the active cursor position via QUndoStack."""
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 2 or self.session is None:
+            return False
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        if row_data is None or cell is None or not cell.can_edit():
+            return False
+
+        # Se um editor inline estiver aberto na célula atual, insere diretamente no cursor do editor
+        focus_w = self.table.focusWidget()
+        if isinstance(focus_w, QPlainTextEdit) and self.table.viewport().isAncestorOf(focus_w):
+            cursor = focus_w.textCursor()
+            cursor.insertText(token)
+            focus_w.setTextCursor(cursor)
+            return True
+
+        curr = cell.local_value or ""
+        cursor_pos = self.cell_delegate.cursor_pos_for(cell)
+        insert_at = len(curr) if cursor_pos is None else min(len(curr), max(0, cursor_pos))
+        new_text = curr[:insert_at] + token + curr[insert_at:]
+        self.cell_delegate.set_cursor_pos_for(cell, insert_at + len(token))
+        if not cell.will_apply_edit(new_text):
+            return False
+        self.undo_stack.push(
+            EditCellCommand(
+                cell=cell,
+                base_text=row_data.base_text,
+                new_value=new_text,
+                row=row,
+                col=col,
+                notify=self.table_model.notify_cell_changed,
+            )
+        )
+        return True
+
+    def toggle_ignore_warning_current(
+        self,
+        rule_id: str,
+        reason: str | None = None,
+    ) -> bool:
+        """Ignore or un-ignore a validation rule on the current cell for its current text hash."""
+        pos = self._current_source_pos()
+        if pos is None or pos[1] < 1 or self.session is None:
+            return False
+        row, col = pos
+        row_data = self.table_model.get_row(row)
+        cell = self.table_model.get_cell(row, col)
+        lang = self._column_lang(col)
+        if row_data is None or cell is None or lang is None:
+            return False
+        val_hash = compute_value_hash(cell.local_value)
+
+        currently_ignored = self.session.has_ignored_warning(
+            row_data.key_path, lang, rule_id, val_hash
+        )
+        if currently_ignored:
+            self.session.set_ignored_warning(
+                row_data.key_path, lang, rule_id, val_hash, ignore=False
+            )
+        else:
+            justification = reason
+            if justification is None:
+                text, ok = QInputDialog.getText(
+                    self,
+                    "Ignore this alert",
+                    f"Optional reason for ignoring '{rule_id}' on {row_data.key_path} ({lang}):",
+                )
+                if not ok:
+                    return False
+                justification = text.strip()
+            self.session.set_ignored_warning(
+                row_data.key_path,
+                lang,
+                rule_id,
+                val_hash,
+                ignore=True,
+                reason=justification,
+            )
+
+        self._validate_row_sync(row)
+        self._project_unsaved = True
+        self._update_window_title()
+        write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
+        self.table_model.notify_cell_changed(row, col)
+        self._sync_inspector_to_current(include_spell_suggestions=True)
+        return True
+
+    def open_custom_enrichers_dialog(self) -> bool:
+        """Open project dialog to edit custom enricher regexes and revalidate the session."""
+        if self.session is None:
+            return False
+        dlg = CustomEnrichersDialog(self.session.custom_enrichers, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        self.session.custom_enrichers = dlg.rules()
+        self._project_unsaved = True
+        self._update_window_title()
+        write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
+        self._start_background_validation(self.session)
+        return True
+
+    def _format_base_state_label(self, row_data: TableRowData) -> str:
+        if self.session is not None:
+            if self.session.base_external_path is not None:
+                return "State: External reference (Read-only)"
+            is_http_only = any(
+                e.lang == self.session.base_lang and e.is_http
+                for e in self.session.manifest.entries
+            ) and not any(
+                e.lang == self.session.base_lang and e.editable
+                for e in self.session.manifest.entries
+            )
+            if is_http_only:
+                return "State: Remote HTTP reference (Read-only)"
+        base_cell = row_data.base_cell
+        if base_cell is None:
+            return "State: Base · Read-only"
+        if base_cell.can_edit():
+            kind_sfx = " (empty)" if base_cell.kind == CellKind.EMPTY else ""
+            dirty_str = "Yes" if base_cell.is_dirty else "No"
+            return f"State: Base{kind_sfx} · Editable · Dirty: {dirty_str}"
+        kind_label = {
+            CellKind.NON_STRING: "non-string",
+            CellKind.STRUCTURAL_CONFLICT: "structural conflict",
+            CellKind.MISSING: "missing",
+        }.get(base_cell.kind, "read-only")
+        return f"State: Base ({kind_label}) · Read-only"
+
+    def _clear_inspector_dynamic_actions(self) -> None:
+        _clear_layout_widgets(self.inspector_dynamic_layout)
+
+    def _on_cell_edited(self, row: int, _col: int) -> None:
+        self._validate_row_sync(row)
+        if self.session is not None:
+            self._project_unsaved = True
+            self._update_window_title()
+            write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
+            self._refresh_statusbar(self.session)
+        self._sync_inspector_to_current(include_spell_suggestions=False)
+
+    def _on_current_changed(self, current: QModelIndex, _prev: QModelIndex) -> None:
+        self._sync_inspector_to_current(current=current, include_spell_suggestions=True)
+
+    def _sync_inspector_to_current(
+        self,
+        current: QModelIndex | None = None,
+        *,
+        include_spell_suggestions: bool = True,
+    ) -> None:
+        target_idx = current if current is not None else self.table.currentIndex()
+        if self.session is None or not target_idx.isValid():
+            return
+        src = self.proxy_model.mapToSource(target_idx)
+        if not src.isValid():
+            return
+        row_data = self.table_model.get_row(src.row())
+        if row_data is None:
+            return
+
+        col = src.column()
+        if col < 2 or not self.session.target_langs:
+            self.inspector_key_label.setText(f"{row_data.key_path}\nLanguage: {self.session.base_lang} (Base)")
+            line_info = f" (line {row_data.base_line})" if row_data.base_line else ""
+            self.inspector_origin_label.setText(
+                f"Source: {row_data.base_source_file or '(missing)'}{line_info}"
+            )
+            self.inspector_state_label.setText(self._format_base_state_label(row_data))
+            self.inspector_stale_label.setVisible(False)
+            self._refresh_inspector_diagnostics(
+                row_data,
+                row_data.base_cell,
+                self.session.base_lang,
+                include_spell_suggestions=include_spell_suggestions,
+            )
+            return
+
+        lang = self.session.target_langs[col - 2]
+        cell = row_data.cells.get(lang)
+        if cell is None:
+            return
+        conds = self.session.lang_conditionals.get(lang, [])
+        cond_suffix = f"\nCondition: {', '.join(conds)}" if conds else ""
+        self.inspector_key_label.setText(f"{row_data.key_path}\nLanguage: {lang}{cond_suffix}")
+        origin = cell.source_file or row_data.base_source_file or "(unknown)"
+        line_info = f" (line {cell.line})" if cell.line else ""
+        self.inspector_origin_label.setText(f"Source: {origin}{line_info}")
+        dirty_str = "Yes" if cell.is_dirty else "No"
+        self.inspector_state_label.setText(
+            f"State: {cell.kind.name} · Review: {cell.review_status} · Dirty: {dirty_str}"
+        )
+        if cell.review_status == "stale" or cell.previous_base is not None:
+            prev_txt = cell.previous_base if cell.previous_base is not None else "(missing)"
+            curr_txt = row_data.base_text if row_data.base_text is not None else "(missing)"
+            self.inspector_stale_label.setText(f"Base changed (STALE):\nBefore: {prev_txt}\nNow: {curr_txt}")
+            self.inspector_stale_label.setVisible(True)
+        else:
+            self.inspector_stale_label.setVisible(False)
+
+        self._refresh_inspector_diagnostics(
+            row_data,
+            cell,
+            lang,
+            include_spell_suggestions=include_spell_suggestions,
+        )
+
+    def _refresh_inspector_diagnostics(
+        self,
+        row_data: TableRowData,
+        cell: CellData | None,
+        lang: str,
+        *,
+        live_text: str | None = None,
+        include_spell_suggestions: bool = True,
+    ) -> None:
+        if self.session is None:
+            return
+        is_base = cell is None or cell.is_base_cell
+        diags: list[str] = []
+        spell_status = self.spell_service.status_for(lang)
+        if not spell_status.available:
+            diags.append(f"[spellcheck] {spell_status.message}")
+        source_file = cell.source_file if (cell is not None and cell.source_file) else (
+            row_data.base_source_file if is_base else None
+        )
+        files_to_check = [source_file] if source_file else []
+        for fatal_path in self.session.fatal_files_by_lang.get(lang, []):
+            if fatal_path not in files_to_check:
+                files_to_check.append(fatal_path)
+        for fpath in files_to_check:
+            for issue in self.session.file_diagnostics.get(fpath, []):
+                if issue.key_path in ("", row_data.key_path) or issue.kind in ("invalid_json", "leaf_before_branch"):
+                    diags.append(f"[{issue.kind}] ({fpath}:{issue.line}) {issue.message}")
+        for w in self.session.warnings:
+            if w.kind == "multi_file_collision" and w.lang == lang and w.key_path == row_data.key_path:
+                diags.append(f"[{w.kind}] {w.message}")
+        base_prefix = "" if is_base else "base:"
+        for base_iss in row_data.base_issues:
+            diags.append(f"[{base_prefix}{base_iss.severity}] {base_iss.message}")
+        if cell is not None:
+            for v_iss in cell.all_validation_issues:
+                tag = f"{v_iss.severity} (ignored)" if v_iss.is_ignored else v_iss.severity
+                reason_sfx = f" — {v_iss.ignored_reason}" if v_iss.ignored_reason else ""
+                sugg_sfx = ""
+                if (
+                    include_spell_suggestions
+                    and v_iss.rule_id.startswith("spell:")
+                    and not v_iss.is_ignored
+                    and v_iss.missing_tokens
+                ):
+                    suggs = self.spell_service.suggest(lang, v_iss.missing_tokens[0], limit=3)
+                    if suggs:
+                        sugg_sfx = f" (Suggestions: {', '.join(suggs)})"
+                diags.append(f"[{tag}:{v_iss.rule_id}] {v_iss.message}{reason_sfx}{sugg_sfx}")
+
+        self.inspector_diag_label.setText("\n".join(diags) if diags else "File diagnostics: OK")
+        self._clear_inspector_dynamic_actions()
+        if live_text is not None:
+            missing_toks = (
+                missing_tokens_for_translation(
+                    row_data.base_text,
+                    live_text,
+                    custom_enrichers=self.session.custom_enrichers,
+                )
+                if (cell is not None and not is_base and cell.can_edit())
+                else []
+            )
+            alert_items = [(v.rule_id, v.is_ignored) for v in cell.all_validation_issues] if cell is not None else []
+        elif cell is not None:
+            missing_toks, alert_items = self._cell_validation_action_specs(row_data, cell)
+        else:
+            missing_toks, alert_items = [], []
+
+        for tok in missing_toks[:6]:
+            btn = QPushButton(f"Insert: {tok}")
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.clicked.connect(lambda _=False, t=tok: self.insert_missing_token_for_current(t))
+            self.inspector_dynamic_layout.addWidget(btn)
+        for rule_id, is_ignored in alert_items:
+            lbl = (
+                f"Re-enable alert ({rule_id})"
+                if is_ignored
+                else f"Ignore this alert ({rule_id})"
+            )
+            btn = QPushButton(lbl)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.clicked.connect(lambda _=False, r=rule_id: self.toggle_ignore_warning_current(r))
+            self.inspector_dynamic_layout.addWidget(btn)

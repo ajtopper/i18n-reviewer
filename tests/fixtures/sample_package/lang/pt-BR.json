@@ -1,0 +1,13 @@
+{
+  "APP": {
+    "Title": "Aplicativo Exemplo",
+    "Points": {
+      "one": "{n} ponto",
+      "many": "{n} pontos",
+      "other": "{n} pontos"
+    }
+  },
+  "FLAT.Key": "Valor plano",
+  "INLINE.A": "Alfa"
+}
+

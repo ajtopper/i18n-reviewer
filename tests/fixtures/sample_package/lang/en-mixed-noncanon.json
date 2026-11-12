@@ -1,0 +1,7 @@
+{
+"FLAT.Key" : "Flat non-canonical value",
+
+  "INLINE": {"A": "Alpha", "B": "Beta"},
+  "EXTRA.Msg": "Extra"
+}
+
