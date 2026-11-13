@@ -145,10 +145,13 @@ class _IgnoreContext:
 
 
 def default_app_data_dir() -> Path:
-    """Return user per-app configuration directory under %APPDATA% (or ~/.config fallback)."""
+    """Return user per-app configuration directory (%APPDATA%, XDG_CONFIG_HOME, or ~/.config)."""
     appdata = os.environ.get("APPDATA")
     if appdata:
         return Path(appdata) / "i18n-reviewer"
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return Path(xdg) / "i18n-reviewer"
     return Path.home() / ".config" / "i18n-reviewer"
 
 

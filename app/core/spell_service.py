@@ -94,6 +94,11 @@ class SpellService:
         )
 
         os.environ["ENCHANT_CONFIG_DIR"] = str(self.effective_enchant_dir)
+        meipass = getattr(__import__("sys"), "_MEIPASS", None)
+        if meipass:
+            enchant_prefix = Path(str(meipass)) / "enchant_prefix"
+            if enchant_prefix.exists() and hasattr(enchant, "set_prefix_dir"):
+                enchant.set_prefix_dir(str(enchant_prefix))
         self._broker = enchant.Broker()
         self._broker.set_ordering("*", "hunspell")
         self._dicts: dict[str, EnchantDictLike | None] = {}

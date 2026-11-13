@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=i18n Reviewer
+GenericName=Localization Review Tool
+Comment=Foundry VTT i18n JSON Translation & Localization Review Tool
+Exec=i18n-reviewer %f
+Icon=i18n-reviewer
+Terminal=false
+Categories=Development;Translation;Utility;
+StartupNotify=true
+

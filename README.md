@@ -1,15 +1,22 @@
 # i18n Reviewer — Foundry VTT Translation & Localization Review Tool
 
-A simple, practical, open-source Windows desktop app created for **Foundry VTT (Foundry Virtual Tabletop)** users, translators, and module/system developers to review, validate, spellcheck, and safely update `i18n` JSON localization files (`module.json` and `system.json`) while preserving original formatting byte-for-byte.
+A simple, practical, open-source desktop app (Windows & Linux) created for **Foundry VTT (Foundry Virtual Tabletop)** users, translators, and module/system developers to review, validate, spellcheck, and safely update `i18n` JSON localization files (`module.json` and `system.json`) while preserving original formatting byte-for-byte.
 
 This project is shared as a free **MIT-licensed** community contribution to make Foundry VTT translation QA accessible and reliable. In its **current stage**, **i18n Reviewer** focuses on **reviewing and polishing existing `i18n` JSON files**—catching broken `@UUID[...]` / `@Embed[...]` enrichers, Handlebars `{{...}}` placeholders, HTML tags, glossary mismatches, and typos—rather than automated machine translation.
 
-## Download (Windows)
+## Download (Windows & Linux)
 
-Non-developers can grab the latest pre-built Windows release from the **Releases** page:
+Non-developers can grab the latest pre-built release from the **Releases** page:
 
-- **Installer:** `i18n-reviewer-<Version>-setup-win64.exe`
-- **Portable ZIP:** `i18n-reviewer-<Version>-win64.zip` (extract and run `i18n-reviewer.exe`)
+- **Windows Installer:** `i18n-reviewer-<Version>-setup-win64.exe`
+- **Windows Portable ZIP:** `i18n-reviewer-<Version>-win64.zip` (extract and run `i18n-reviewer.exe`)
+- **Linux AppImage (`x86_64`):** `i18n-reviewer-<Version>-x86_64.AppImage`
+  ```bash
+  chmod +x i18n-reviewer-<Version>-x86_64.AppImage
+  ./i18n-reviewer-<Version>-x86_64.AppImage
+  # If your distro/container does not have FUSE installed:
+  ./i18n-reviewer-<Version>-x86_64.AppImage --appimage-extract-and-run
+  ```
 
 *(See [CHANGELOG.md](CHANGELOG.md) for release notes and `SHA256SUMS.txt` on each release for checksum verification.)*
 
@@ -144,7 +151,7 @@ Useful flags:
 .\scripts\package_windows.ps1 -Version 0.1.0 -BuildInstaller
 ```
 
-### Option B: Manual Build & Verification
+### Option B: Manual Windows Build & Verification
 
 ```powershell
 # 1. Build dist\i18n-reviewer\
@@ -154,12 +161,22 @@ Useful flags:
 .\dist\i18n-reviewer\i18n-reviewer.exe --self-test
 ```
 
+### Linux AppImage Build (`x86_64`)
+
+Install system libraries (`libenchant-2-2`, `enchant-2`, `libhunspell-dev`, Qt 6 XCB/EGL/GL runtime libs, and `file`), create `.venv`, and run:
+
+```bash
+bash scripts/package_linux_appimage.sh --version 0.1.0
+```
+
+This builds with `spec/build_linux.spec`, bundles `AppDir` metadata (`packaging/linux/i18n-reviewer.desktop`, `resources/icons/i18n-reviewer.svg`, `packaging/linux/AppRun`), packages `dist/i18n-reviewer-0.1.0-x86_64.AppImage`, and runs `--self-test` in both normal and non-ASCII paths.
+
 ### Releasing on GitHub (Standard Post-Merge Flow)
 
-GitHub Actions workflows under `.github/workflows/` automate validation and Windows releases:
+GitHub Actions workflows under `.github/workflows/` automate validation and cross-platform releases:
 
-1. **Continuous Integration ([ci.yml](.github/workflows/ci.yml)):** Runs `mypy app` and `pytest -v` on every pull request and push to `main`.
-2. **Automated Windows Release ([release.yml](.github/workflows/release.yml)):** After updating [CHANGELOG.md](CHANGELOG.md) and `pyproject.toml` and merging to `main`, create and push a semantic version tag (or trigger the **Release Windows Build** workflow manually from GitHub Actions):
+1. **Continuous Integration ([ci.yml](.github/workflows/ci.yml)):** Runs `mypy app`, `pytest -v`, and `--self-test` on `windows-latest` and `ubuntu-24.04` on every pull request and push to `main`.
+2. **Automated Windows & Linux Release ([release.yml](.github/workflows/release.yml)):** After updating [CHANGELOG.md](CHANGELOG.md) and `pyproject.toml` and merging to `main`, create and push a semantic version tag (or trigger the **Release Windows & Linux AppImage** workflow manually from GitHub Actions):
 
 ```powershell
 git checkout main
@@ -168,11 +185,12 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The release workflow runs type checks and tests, builds the `--onedir` bundle + Inno Setup installer via `scripts\package_windows.ps1 -BuildInstaller`, verifies `--self-test`, generates `SHA256SUMS.txt`, and publishes a GitHub Release with:
+The release workflow builds and self-tests both platforms in parallel, generates a unified `SHA256SUMS.txt`, and publishes a GitHub Release with:
 
 - `i18n-reviewer-<Version>-setup-win64.exe` (Windows installer)
-- `i18n-reviewer-<Version>-win64.zip` (portable archive containing `i18n-reviewer.exe`, DLLs, dictionaries, and `licenses/`)
-- `SHA256SUMS.txt` (SHA-256 checksums for both downloads)
+- `i18n-reviewer-<Version>-win64.zip` (Windows portable archive)
+- `i18n-reviewer-<Version>-x86_64.AppImage` (Linux `x86_64` portable AppImage)
+- `SHA256SUMS.txt` (SHA-256 checksums for all downloads)
 
 ## License & Third-Party Notices
 

@@ -24,7 +24,7 @@ from app.core.project_manager import (
     load_package_session,
     propagate_base_change,
 )
-from app.core.validator import CustomEnricherRule, IgnoredWarning
+from app.core.validator import CustomEnricherRule, IgnoredWarning, default_app_data_dir
 
 CURRENT_SCHEMA_VERSION = 1
 ConflictChoice = Literal["keep_local", "accept_disk", "manual"]
@@ -88,14 +88,6 @@ class LoadedProjectResult:
     session: PackageSession
     sync_report: SyncReport
     migrated_from: int | None = None
-
-
-def default_app_data_dir() -> Path:
-    """Return per-user application data directory (%APPDATA%\\i18n-reviewer on Windows)."""
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        return Path(appdata) / "i18n-reviewer"
-    return Path.home() / ".config" / "i18n-reviewer"
 
 
 def atomic_write_text(target: Path, content: str) -> None:

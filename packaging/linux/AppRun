@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HERE="$(dirname "$(readlink -f "$0")")"
+BUNDLE_DIR="$HERE/usr/lib/i18n-reviewer"
+INTERNAL_DIR="$BUNDLE_DIR/_internal"
+
+if [ -d "$INTERNAL_DIR" ]; then
+  export LD_LIBRARY_PATH="$INTERNAL_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+if [ -d "$INTERNAL_DIR/PySide6/Qt/plugins" ]; then
+  export QT_PLUGIN_PATH="$INTERNAL_DIR/PySide6/Qt/plugins"
+fi
+
+exec "$BUNDLE_DIR/i18n-reviewer" "$@"
+

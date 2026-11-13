@@ -71,9 +71,9 @@ def _read_settings_ascii_dir(app_data_dir: Path) -> Path | None:
 
 
 def resolve_ascii_enchant_dir(app_data_dir: Path, enchant_dir: Path) -> Path:
-    """Resolve an ASCII-safe Enchant directory via Windows 8.3 short path or settings fallback."""
+    """Resolve an Enchant directory, using Windows 8.3/ASCII fallback only on Windows."""
     enchant_dir.mkdir(parents=True, exist_ok=True)
-    if str(enchant_dir).isascii():
+    if os.name != "nt" or str(enchant_dir).isascii():
         return enchant_dir
     short_cand = windows_short_path(enchant_dir)
     if str(short_cand).isascii():

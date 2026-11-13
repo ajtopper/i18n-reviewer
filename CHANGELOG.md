@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Linux runtime portability (`XDG_CONFIG_HOME` / `~/.config/i18n-reviewer` data path, POSIX non-ASCII spellchecker handling, and offline `en_US` dictionary in `resources/hunspell/`).
+- Linux `x86_64` AppImage packaging (`spec/build_linux.spec`, `scripts/package_linux_appimage.sh`, `.desktop` entry, SVG icon, and `AppRun`).
+- Dual-platform CI (`windows-latest` + `ubuntu-24.04`) and parallel Windows + Linux AppImage GitHub Release workflow.
+
 ## [0.1.0] - 2026-11-12
 
 Initial release of **i18n Reviewer** for Foundry VTT users, translators, and module/system developers.

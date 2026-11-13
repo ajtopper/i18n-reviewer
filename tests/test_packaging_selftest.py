@@ -70,6 +70,21 @@ def test_packaging_manifests_spec_and_licenses_are_present() -> None:
 
     assert (REPO_ROOT / "scripts" / "package_windows.ps1").exists()
     assert (REPO_ROOT / "installer" / "i18n-reviewer.iss").exists()
+    assert (REPO_ROOT / "spec" / "build_linux.spec").exists()
+    assert (REPO_ROOT / "scripts" / "package_linux_appimage.sh").exists()
+    assert (REPO_ROOT / "packaging" / "linux" / "i18n-reviewer.desktop").exists()
+    assert (REPO_ROOT / "packaging" / "linux" / "AppRun").exists()
+    assert (REPO_ROOT / "resources" / "icons" / "i18n-reviewer.svg").exists()
+
+    for posix_script in (
+        REPO_ROOT / "scripts" / "package_linux_appimage.sh",
+        REPO_ROOT / "packaging" / "linux" / "AppRun",
+    ):
+        assert b"\r\n" not in posix_script.read_bytes(), f"CRLF detected in {posix_script}"
+
+    desktop_txt = (REPO_ROOT / "packaging" / "linux" / "i18n-reviewer.desktop").read_text(encoding="utf-8")
+    assert "Exec=i18n-reviewer %f" in desktop_txt
+    assert "Icon=i18n-reviewer" in desktop_txt
 
 
 @pytest.mark.skipif(

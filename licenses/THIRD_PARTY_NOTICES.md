@@ -68,4 +68,5 @@ This distribution bundles only the shared libraries required by `libenchant-2.dl
 
 - **CPython 3.14:** Python Software Foundation License v2 (`PSF-2.0`) — https://www.python.org/
 - **PyInstaller 6.22.3 Bootloader:** `GPL-2.0-or-later` with PyInstaller Bootloader Exception (`GPL-2.0.txt`) — https://github.com/pyinstaller/pyinstaller
+- **Linux AppImage Runtime (`appimagetool` / AppImageKit):** MIT License — https://github.com/AppImage/appimagetool (bundles `libenchant-2`, `enchant_hunspell.so`, `libhunspell`, Qt 6 shared libraries, and `licenses/` inside the AppImage)
 

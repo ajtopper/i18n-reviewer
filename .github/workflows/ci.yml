@@ -8,7 +8,11 @@ on:
 
 jobs:
   test-and-typecheck:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -18,18 +22,58 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Create virtual environment and install dependencies
+      - name: Install Linux system libraries for Qt 6 and Enchant/Hunspell
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libenchant-2-2 \
+            enchant-2 \
+            libhunspell-dev \
+            libegl1 \
+            libgl1 \
+            libxkbcommon0 \
+            libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-randr0 \
+            libxcb-render-util0 \
+            libxcb-shape0 \
+            libxcb-xinerama0 \
+            libfontconfig1 \
+            libdbus-1-3
+
+      - name: Create virtual environment and install dependencies (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           python -m venv .venv
           .\.venv\Scripts\python.exe -m pip install --upgrade pip
           .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 
-      - name: Run mypy type check
-        shell: pwsh
-        run: .\.venv\Scripts\mypy.exe app
+      - name: Create virtual environment and install dependencies (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements-dev.txt
 
-      - name: Run pytest suite
+      - name: Run mypy, pytest, and --self-test (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
-        run: .\.venv\Scripts\python.exe -m pytest -v
+        run: |
+          .\.venv\Scripts\mypy.exe app
+          .\.venv\Scripts\python.exe -m pytest -v
+          .\.venv\Scripts\python.exe -m app.main --self-test
 
+      - name: Run mypy, pytest, and --self-test (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          .venv/bin/mypy app
+          .venv/bin/python -m pytest -v
+          .venv/bin/python -m app.main --self-test
