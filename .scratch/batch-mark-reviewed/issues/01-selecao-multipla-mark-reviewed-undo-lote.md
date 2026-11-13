@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Selecionar múltiplas células com `Shift+Click`, `Shift+Setas` ou `Ctrl+Click` e acionar `Mark Reviewed` marca todas as células de idioma elegíveis selecionadas.
-- [ ] Células das colunas `Key` e `Base` ou células já revisadas/não elegíveis presentes na seleção são ignoradas sem erro.
-- [ ] `Ctrl+Z` desfaz a revisão de todo o lote em um único passo, e `Ctrl+Y` refaz todo o lote.
-- [ ] Testes automatizados cobrem seleção múltipla, filtragem de células elegíveis e Undo/Redo em lote.
+- [x] Selecionar múltiplas células com `Shift+Click`, `Shift+Setas` ou `Ctrl+Click` e acionar `Mark Reviewed` marca todas as células de idioma elegíveis selecionadas.
+- [x] Células das colunas `Key` e `Base` ou células já revisadas/não elegíveis presentes na seleção são ignoradas sem erro.
+- [x] `Ctrl+Z` desfaz a revisão de todo o lote em um único passo, e `Ctrl+Y` refaz todo o lote.
+- [x] Testes automatizados cobrem seleção múltipla, filtragem de células elegíveis e Undo/Redo em lote.
 

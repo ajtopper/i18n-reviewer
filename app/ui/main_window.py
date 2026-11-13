@@ -633,6 +633,8 @@ class MainWindow(QMainWindow):
         self.table = QTableView()
         self.table.setModel(self.proxy_model)
         self.table.setAlternatingRowColors(True)
+        self.table.setSelectionMode(QTableView.SelectionMode.ExtendedSelection)
+        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectItems)
         self.cell_delegate = StatusCellDelegate(
             self.table,
             custom_enrichers_getter=lambda: list(self.session.custom_enrichers) if self.session else [],
@@ -648,6 +650,7 @@ class MainWindow(QMainWindow):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.selectionModel().currentChanged.connect(self._on_current_changed)
+        self.table.selectionModel().selectionChanged.connect(lambda *_: self._update_review_button_label())
         table_layout.addWidget(self.table, 1)
 
         self.proxy_model.modelReset.connect(self._refresh_context_bar)
@@ -1252,25 +1255,71 @@ class MainWindow(QMainWindow):
             return None
         return src.row(), src.column()
 
+    def _selected_reviewable_cells(self) -> list[tuple[int, int, CellData, QModelIndex]]:
+        """Return unique (source_row, col, cell, proxy_index) tuples eligible for Mark Reviewed."""
+        sel_model = self.table.selectionModel()
+        indexes = list(sel_model.selectedIndexes()) if sel_model is not None else []
+        if not indexes:
+            cur = self.table.currentIndex()
+            if cur.isValid():
+                indexes = [cur]
+        seen: set[tuple[int, int]] = set()
+        results: list[tuple[int, int, CellData, QModelIndex]] = []
+        for proxy_idx in sorted(indexes, key=lambda idx: (idx.column(), idx.row())):
+            if not proxy_idx.isValid() or proxy_idx.column() < 2:
+                continue
+            src = self.proxy_model.mapToSource(proxy_idx)
+            if not src.isValid():
+                continue
+            key = (src.row(), src.column())
+            if key in seen:
+                continue
+            seen.add(key)
+            cell = self.table_model.get_cell(src.row(), src.column())
+            if cell is not None and cell.can_mark_reviewed():
+                results.append((src.row(), src.column(), cell, proxy_idx))
+        return results
+
+    def _update_review_button_label(self) -> None:
+        count = len(self._selected_reviewable_cells())
+        if count > 1:
+            self.btn_review_next.setText(f"Mark {count} Reviewed + Next (Ctrl+Enter)")
+        else:
+            self.btn_review_next.setText("Mark Reviewed + Next (Ctrl+Enter)")
+
+    def mark_selected_reviewed(self) -> int:
+        targets = self._selected_reviewable_cells()
+        if not targets:
+            return 0
+        if len(targets) == 1:
+            row, col, cell, _ = targets[0]
+            self.undo_stack.push(
+                ReviewCellCommand(cell, row, col, self.table_model.notify_cell_changed)
+            )
+        else:
+            self.undo_stack.beginMacro(f"Mark {len(targets)} cells reviewed")
+            try:
+                for row, col, cell, _ in targets:
+                    self.undo_stack.push(
+                        ReviewCellCommand(cell, row, col, self.table_model.notify_cell_changed)
+                    )
+            finally:
+                self.undo_stack.endMacro()
+            self.statusBar().showMessage(f"Marked {len(targets)} cells as reviewed.")
+        self._update_review_button_label()
+        return len(targets)
+
     def mark_current_reviewed(self) -> bool:
-        pos = self._current_source_pos()
-        if pos is None or pos[1] < 2:
-            return False
-        row, col = pos
-        cell = self.table_model.get_cell(row, col)
-        if cell is None or not cell.can_mark_reviewed():
-            return False
-        self.undo_stack.push(
-            ReviewCellCommand(cell, row, col, self.table_model.notify_cell_changed)
-        )
-        return True
+        return self.mark_selected_reviewed() > 0
 
     def review_and_advance(self) -> None:
-        self.mark_current_reviewed()
-        self.jump_to_next_pending()
+        targets = self._selected_reviewable_cells()
+        last_proxy = targets[-1][3] if targets else None
+        self.mark_selected_reviewed()
+        self.jump_to_next_pending(from_index=last_proxy)
 
-    def jump_to_next_pending(self) -> None:
-        current_index = self.table.currentIndex()
+    def jump_to_next_pending(self, from_index: QModelIndex | None = None) -> None:
+        current_index = from_index if (from_index is not None and from_index.isValid()) else self.table.currentIndex()
         row_count = self.proxy_model.rowCount()
         if row_count == 0 or not self.table_model.target_langs:
             return

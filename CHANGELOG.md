@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Card-based Inspector layout (`Key Metadata & Location`, `Validation & Diagnostics`, and action footer with highlighted `Mark Reviewed + Next`).
   - Adaptive vector icons across toolbar, sidebar, and action buttons via `QtAwesome`.
   - Live comparison prototype script (`scripts/ui_prototype.py`).
+- **Batch Multi-Cell Review:**
+  - Support Shift/Ctrl multi-cell selection for **Mark Reviewed** and **Mark Reviewed + Next (`Ctrl+Enter`)**, marking all eligible selected language cells in a single undoable/redoable macro, displaying live batch counts, and advancing to the next pending cell after the selection.
 
 ### Changed
 
