@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import enchant
+from PyInstaller.utils.hooks import collect_data_files
 
 PROJECT_ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 _ENCHANT_HUNSPELL_DIR = os.path.join(
@@ -77,7 +78,7 @@ def _keep_data(entry: tuple[str, ...]) -> bool:
 _EXTRA_DATAS = [
     (os.path.join(PROJECT_ROOT, "resources", "hunspell"), os.path.join("resources", "hunspell")),
     (os.path.join(PROJECT_ROOT, "licenses"), "licenses"),
-]
+] + collect_data_files("qtawesome")
 for _en_name in ("en_US.aff", "en_US.dic"):
     _en_src = os.path.join(_ENCHANT_HUNSPELL_DIR, _en_name)
     if os.path.exists(_en_src):
