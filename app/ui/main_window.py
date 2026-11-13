@@ -112,6 +112,7 @@ from app.ui.glossary_dialog import (
 )
 from app.ui.highlighter import TokenHighlighter
 from app.ui.table_model import PackageFilterProxyModel, StatusFilterMode, TranslationTableModel
+from app.ui.theme import LIGHT_TOKENS, ThemeManager, ThemeMode, ThemeTokens, theme_icon
 from app.ui.validation_worker import (
     RowValidationResult,
     RowValidationSnapshot,
@@ -227,6 +228,7 @@ class ExpandedEditorDialog(QDialog):
         glossary_entries: list[GlossaryEntry] | None = None,
         *,
         editable_base: bool = False,
+        tokens: ThemeTokens | None = None,
     ) -> None:
         super().__init__(parent)
         mode_title = f"{lang} (Base)" if editable_base else lang
@@ -238,6 +240,7 @@ class ExpandedEditorDialog(QDialog):
         self._editable_base = editable_base
         self._custom_enrichers = list(custom_enrichers or [])
         self._glossary_entries = list(glossary_entries or [])
+        self._tokens = tokens or LIGHT_TOKENS
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"Key: {key_path} · Language: {mode_title}"))
@@ -251,7 +254,7 @@ class ExpandedEditorDialog(QDialog):
         self.base_view = QPlainTextEdit()
         self.base_view.setReadOnly(True)
         self.base_view.setPlainText(base_text)
-        TokenHighlighter(self.base_view.document(), custom_enrichers=self._custom_enrichers)
+        TokenHighlighter(self.base_view.document(), custom_enrichers=self._custom_enrichers, tokens=tokens)
         if not editable_base:
             left_box = QVBoxLayout()
             left_box.addWidget(QLabel("Reference (Base):"))
@@ -264,7 +267,7 @@ class ExpandedEditorDialog(QDialog):
         )
         self.target_edit = QPlainTextEdit()
         self.target_edit.setPlainText(base_text if editable_base else target_text)
-        TokenHighlighter(self.target_edit.document(), custom_enrichers=self._custom_enrichers)
+        TokenHighlighter(self.target_edit.document(), custom_enrichers=self._custom_enrichers, tokens=tokens)
         if not editable_base:
             attach_ctrl_space_glossary_popup(
                 self.target_edit,
@@ -310,10 +313,10 @@ class ExpandedEditorDialog(QDialog):
                 self.live_alert_label.setText(
                     "Base notes: " + " | ".join(f"[{i.severity}] {i.message}" for i in issues)
                 )
-                self.live_alert_label.setStyleSheet("color: #1d4ed8;")
+                self.live_alert_label.setStyleSheet(f"color: {self._tokens.info_fg};")
             else:
                 self.live_alert_label.setText("No base issues.")
-                self.live_alert_label.setStyleSheet("color: #15803d;")
+                self.live_alert_label.setStyleSheet(f"color: {self._tokens.primary};")
             return
 
         self.token_strip.setVisible(True)
@@ -348,10 +351,10 @@ class ExpandedEditorDialog(QDialog):
             self.live_alert_label.setText(
                 "Alerts: " + " | ".join(f"[{i.severity}] {i.message}" for i in issues)
             )
-            self.live_alert_label.setStyleSheet("color: #b91c1c;")
+            self.live_alert_label.setStyleSheet(f"color: {self._tokens.error};")
         else:
             self.live_alert_label.setText("No validation alerts.")
-            self.live_alert_label.setStyleSheet("color: #15803d;")
+            self.live_alert_label.setStyleSheet(f"color: {self._tokens.primary};")
 
     def edited_text(self) -> str:
         return self.target_edit.toPlainText()
@@ -365,6 +368,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("i18n Reviewer")
         self.resize(1360, 780)
         self.app_data_dir = app_data_dir or default_app_data_dir()
+        self.theme_manager = ThemeManager(app_data_dir=self.app_data_dir, parent=self)
+        self.theme_manager.apply()
+        self.theme_manager.theme_changed.connect(self._on_theme_changed)
         self.session: PackageSession | None = None
         self._project_unsaved: bool = False
         self.lang_checkboxes: dict[str, QCheckBox] = {}
@@ -393,6 +399,7 @@ class MainWindow(QMainWindow):
 
         self._build_toolbar()
         self._build_central()
+        self._on_theme_changed(self.theme_manager.tokens)
         self._bind_shortcuts()
         self.table_model.cell_edited.connect(self._on_cell_edited)
         self.setStatusBar(QStatusBar())
@@ -457,6 +464,12 @@ class MainWindow(QMainWindow):
         )
         self.toolbar.addWidget(spacer)
 
+        self.toggle_sidebar_button = QPushButton("Sidebar")
+        self.toggle_sidebar_button.setCheckable(True)
+        self.toggle_sidebar_button.setChecked(True)
+        self.toggle_sidebar_button.toggled.connect(self._toggle_sidebar)
+        self.toolbar.addWidget(self.toggle_sidebar_button)
+
         self.toggle_inspector_button = QPushButton("Inspector")
         self.toggle_inspector_button.setCheckable(True)
         self.toggle_inspector_button.setChecked(True)
@@ -475,12 +488,62 @@ class MainWindow(QMainWindow):
         self.btn_restore_backup.clicked.connect(self.open_backup_dialog)
         self.toolbar.addWidget(self.btn_restore_backup)
 
+        self.theme_combo = QComboBox()
+        self.theme_combo.setToolTip("UI Theme")
+        self.theme_combo.addItem("Auto", "auto")
+        self.theme_combo.addItem("Light", "light")
+        self.theme_combo.addItem("Dark", "dark")
+        theme_idx = self.theme_combo.findData(self.theme_manager.mode)
+        if theme_idx >= 0:
+            self.theme_combo.setCurrentIndex(theme_idx)
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_combo_changed)
+        self.toolbar.addWidget(self.theme_combo)
+
         self.btn_publish = QPushButton("Send to Production")
-        self.btn_publish.setStyleSheet(
-            "QPushButton { background: #15803d; color: white; font-weight: bold; padding: 4px 10px; border-radius: 4px; }"
-        )
+        self.btn_publish.setObjectName("PrimaryCTA")
         self.btn_publish.clicked.connect(self.publish_to_production)
         self.toolbar.addWidget(self.btn_publish)
+
+    def _on_theme_combo_changed(self) -> None:
+        mode = self.theme_combo.currentData()
+        if mode in ("auto", "light", "dark"):
+            self.theme_manager.set_mode(mode)
+
+    def _on_theme_changed(self, tokens: ThemeTokens) -> None:
+        self.cell_delegate.set_theme(tokens)
+        self.table.viewport().update()
+        self.inspector_stale_label.setStyleSheet(
+            f"background: {tokens.stale_bg}; color: {tokens.stale_fg}; padding: 6px; border-radius: 4px;"
+        )
+        self.diagnostic_banner.setStyleSheet(
+            f"QLabel {{ background: {tokens.warning_bg}; color: {tokens.warning_fg}; padding: 6px 10px; "
+            f"border-bottom: 1px solid {tokens.warning_border}; font-weight: bold; }}"
+        )
+        self.external_change_banner.setStyleSheet(
+            f"QFrame {{ background: {tokens.info_bg}; border-bottom: 1px solid {tokens.info_border}; padding: 4px 10px; }}"
+        )
+        self.external_change_label.setStyleSheet(f"color: {tokens.info_fg}; font-weight: bold;")
+        self._refresh_icons(tokens)
+
+    def _refresh_icons(self, tokens: ThemeTokens) -> None:
+        fg = tokens.text_primary
+        on_cta = tokens.on_primary
+        self.open_action.setIcon(theme_icon("mdi6.file-plus-outline", fg))
+        self.open_proj_action.setIcon(theme_icon("mdi6.folder-open-outline", fg))
+        self.save_proj_action.setIcon(theme_icon("mdi6.content-save-outline", fg))
+        self.undo_action.setIcon(theme_icon("mdi6.undo", fg))
+        self.redo_action.setIcon(theme_icon("mdi6.redo", fg))
+        self.toggle_sidebar_button.setIcon(theme_icon("mdi6.dock-left", fg))
+        self.toggle_inspector_button.setIcon(theme_icon("mdi6.dock-right", fg))
+        self.btn_custom_enrichers.setIcon(theme_icon("mdi6.auto-fix", fg))
+        self.btn_glossary.setIcon(theme_icon("mdi6.book-open-variant", fg))
+        self.btn_restore_backup.setIcon(theme_icon("mdi6.backup-restore", fg))
+        self.btn_publish.setIcon(theme_icon("mdi6.rocket-launch-outline", on_cta))
+        self.btn_review_next.setIcon(theme_icon("mdi6.check-circle-outline", on_cta))
+        self.btn_next_pending.setIcon(theme_icon("mdi6.arrow-down", fg))
+        self.btn_expanded_editor.setIcon(theme_icon("mdi6.arrow-expand", fg))
+        self.btn_revert_cell.setIcon(theme_icon("mdi6.history", fg))
+        self.btn_orphan_delete.setIcon(theme_icon("mdi6.delete-outline", tokens.error))
 
     def _build_central(self) -> None:
         container = QWidget()
@@ -514,13 +577,68 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
+        self.sidebar_panel = QFrame()
+        self.sidebar_panel.setObjectName("SidebarPanel")
+        self.sidebar_panel.setMinimumWidth(190)
+        self.sidebar_panel.setMaximumWidth(260)
+        sb_layout = QVBoxLayout(self.sidebar_panel)
+        sb_layout.setContentsMargins(10, 10, 10, 10)
+        sb_layout.setSpacing(6)
+
+        lbl_sb_filters = QLabel("Status Filters")
+        lbl_sb_filters.setObjectName("SectionHeader")
+        sb_layout.addWidget(lbl_sb_filters)
+        self.sidebar_status_list = QListWidget()
+        for idx in range(self.status_filter_combo.count()):
+            item = QListWidgetItem(self.status_filter_combo.itemText(idx))
+            item.setData(Qt.ItemDataRole.UserRole, self.status_filter_combo.itemData(idx))
+            self.sidebar_status_list.addItem(item)
+        self.sidebar_status_list.setCurrentRow(0)
+        self.sidebar_status_list.currentRowChanged.connect(self._on_sidebar_status_changed)
+        sb_layout.addWidget(self.sidebar_status_list, 1)
+
+        lbl_sb_files = QLabel("Package Files")
+        lbl_sb_files.setObjectName("SectionHeader")
+        sb_layout.addWidget(lbl_sb_files)
+        self.sidebar_file_list = QListWidget()
+        first_file = QListWidgetItem("All files")
+        first_file.setData(Qt.ItemDataRole.UserRole, None)
+        self.sidebar_file_list.addItem(first_file)
+        self.sidebar_file_list.setCurrentRow(0)
+        self.sidebar_file_list.currentRowChanged.connect(self._on_sidebar_file_changed)
+        sb_layout.addWidget(self.sidebar_file_list, 2)
+
+        table_container = QWidget()
+        table_layout = QVBoxLayout(table_container)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        table_layout.setSpacing(0)
+
+        self.context_bar = QFrame()
+        self.context_bar.setObjectName("ContextBar")
+        ctx_layout = QHBoxLayout(self.context_bar)
+        ctx_layout.setContentsMargins(10, 5, 10, 5)
+        ctx_layout.setSpacing(8)
+        self.context_breadcrumb_label = QLabel("All files / All")
+        self.context_count_badge = QLabel("0 keys shown")
+        self.context_count_badge.setObjectName("PillBadge")
+        self.btn_compact_density = QPushButton("Compact")
+        self.btn_compact_density.setCheckable(True)
+        self.btn_compact_density.toggled.connect(self._on_density_toggled)
+        ctx_layout.addWidget(self.context_breadcrumb_label)
+        ctx_layout.addWidget(self.context_count_badge)
+        ctx_layout.addStretch()
+        ctx_layout.addWidget(self.btn_compact_density)
+        table_layout.addWidget(self.context_bar)
+
         self.table = QTableView()
         self.table.setModel(self.proxy_model)
+        self.table.setAlternatingRowColors(True)
         self.cell_delegate = StatusCellDelegate(
             self.table,
             custom_enrichers_getter=lambda: list(self.session.custom_enrichers) if self.session else [],
             live_text_changed=self._on_inline_text_changed,
             glossary_context_getter=self._glossary_context_for_index,
+            tokens=self.theme_manager.tokens,
         )
         self.table.setItemDelegate(self.cell_delegate)
         self.table.setWordWrap(True)
@@ -530,33 +648,63 @@ class MainWindow(QMainWindow):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.selectionModel().currentChanged.connect(self._on_current_changed)
+        table_layout.addWidget(self.table, 1)
+
+        self.proxy_model.modelReset.connect(self._refresh_context_bar)
+        self.proxy_model.layoutChanged.connect(self._refresh_context_bar)
+        self.proxy_model.rowsInserted.connect(lambda *_: self._refresh_context_bar())
+        self.proxy_model.rowsRemoved.connect(lambda *_: self._refresh_context_bar())
 
         self.inspector_panel = QFrame()
+        self.inspector_panel.setObjectName("InspectorPanel")
         self.inspector_panel.setMinimumWidth(300)
         self.inspector_panel.setMaximumWidth(400)
-        self.inspector_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        self.inspector_panel.setFrameShape(QFrame.Shape.NoFrame)
         pv = QVBoxLayout(self.inspector_panel)
+        pv.setContentsMargins(10, 10, 10, 10)
+        pv.setSpacing(8)
 
+        card_meta = QFrame()
+        card_meta.setObjectName("InspectorCard")
+        meta_layout = QVBoxLayout(card_meta)
+        meta_layout.setContentsMargins(10, 10, 10, 10)
+        meta_layout.setSpacing(6)
+        lbl_meta_hdr = QLabel("Key Metadata & Location")
+        lbl_meta_hdr.setObjectName("SectionHeader")
         self.inspector_key_label = QLabel("Select a cell")
+        self.inspector_key_label.setObjectName("KeyChip")
         self.inspector_key_label.setWordWrap(True)
-        self.inspector_key_label.setStyleSheet("font-weight: bold; font-size: 13px;")
         self.inspector_origin_label = QLabel("")
         self.inspector_origin_label.setWordWrap(True)
         self.inspector_state_label = QLabel("")
         self.inspector_state_label.setWordWrap(True)
+        meta_layout.addWidget(lbl_meta_hdr)
+        meta_layout.addWidget(self.inspector_key_label)
+        meta_layout.addWidget(self.inspector_origin_label)
+        meta_layout.addWidget(self.inspector_state_label)
+
+        card_diag = QFrame()
+        card_diag.setObjectName("InspectorCard")
+        diag_layout = QVBoxLayout(card_diag)
+        diag_layout.setContentsMargins(10, 10, 10, 10)
+        diag_layout.setSpacing(6)
+        lbl_diag_hdr = QLabel("Validation & Diagnostics")
+        lbl_diag_hdr.setObjectName("SectionHeader")
         self.inspector_stale_label = QLabel("")
         self.inspector_stale_label.setWordWrap(True)
-        self.inspector_stale_label.setStyleSheet(
-            "background: #ede9fe; color: #4c1d95; padding: 6px; border-radius: 4px;"
-        )
         self.inspector_stale_label.setVisible(False)
         self.inspector_diag_label = QLabel("")
         self.inspector_diag_label.setWordWrap(True)
         self.inspector_actions_container = QWidget()
         self.inspector_dynamic_layout = QVBoxLayout(self.inspector_actions_container)
         self.inspector_dynamic_layout.setContentsMargins(0, 4, 0, 4)
+        diag_layout.addWidget(lbl_diag_hdr)
+        diag_layout.addWidget(self.inspector_stale_label)
+        diag_layout.addWidget(self.inspector_diag_label)
+        diag_layout.addWidget(self.inspector_actions_container)
 
         self.btn_review_next = QPushButton("Mark Reviewed + Next (Ctrl+Enter)")
+        self.btn_review_next.setObjectName("PrimaryCTA")
         self.btn_review_next.clicked.connect(self.review_and_advance)
         self.btn_next_pending = QPushButton("Next Pending (Ctrl+Down)")
         self.btn_next_pending.clicked.connect(self.jump_to_next_pending)
@@ -565,25 +713,30 @@ class MainWindow(QMainWindow):
         self.btn_revert_cell = QPushButton("Revert to production")
         self.btn_revert_cell.clicked.connect(self.revert_current_cell)
         self.btn_orphan_delete = QPushButton("Remove orphan key...")
+        self.btn_orphan_delete.setObjectName("DangerLink")
         self.btn_orphan_delete.clicked.connect(self.toggle_orphan_deletion_current_cell)
 
-        pv.addWidget(self.inspector_key_label)
-        pv.addWidget(self.inspector_origin_label)
-        pv.addWidget(self.inspector_state_label)
-        pv.addWidget(self.inspector_stale_label)
-        pv.addWidget(self.inspector_diag_label)
-        pv.addWidget(self.inspector_actions_container)
+        pv.addWidget(card_meta)
+        pv.addWidget(card_diag)
         pv.addStretch()
         pv.addWidget(self.btn_review_next)
-        pv.addWidget(self.btn_next_pending)
-        pv.addWidget(self.btn_expanded_editor)
-        pv.addWidget(self.btn_revert_cell)
-        pv.addWidget(self.btn_orphan_delete)
+        mid_actions = QHBoxLayout()
+        mid_actions.setSpacing(6)
+        mid_actions.addWidget(self.btn_next_pending)
+        mid_actions.addWidget(self.btn_expanded_editor)
+        pv.addLayout(mid_actions)
+        bot_actions = QHBoxLayout()
+        bot_actions.setSpacing(6)
+        bot_actions.addWidget(self.btn_revert_cell)
+        bot_actions.addWidget(self.btn_orphan_delete)
+        pv.addLayout(bot_actions)
 
-        splitter.addWidget(self.table)
+        splitter.addWidget(self.sidebar_panel)
+        splitter.addWidget(table_container)
         splitter.addWidget(self.inspector_panel)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 4)
+        splitter.setStretchFactor(2, 1)
         root_layout.addWidget(splitter, 1)
         self.setCentralWidget(container)
 
@@ -995,11 +1148,23 @@ class MainWindow(QMainWindow):
         self.file_filter_combo.blockSignals(True)
         self.file_filter_combo.clear()
         self.file_filter_combo.addItem("All files", None)
+        self.sidebar_file_list.blockSignals(True)
+        self.sidebar_file_list.clear()
+        all_item = QListWidgetItem("All files")
+        all_item.setData(Qt.ItemDataRole.UserRole, None)
+        self.sidebar_file_list.addItem(all_item)
         for lf in session.files:
-            self.file_filter_combo.addItem(f"{lf.lang}: {lf.rel_path}", lf.rel_path)
+            label = f"{lf.lang}: {lf.rel_path}"
+            self.file_filter_combo.addItem(label, lf.rel_path)
+            sb_item = QListWidgetItem(label)
+            sb_item.setData(Qt.ItemDataRole.UserRole, lf.rel_path)
+            self.sidebar_file_list.addItem(sb_item)
         self.file_filter_combo.setCurrentIndex(0)
         self.file_filter_combo.blockSignals(False)
+        self.sidebar_file_list.setCurrentRow(0)
+        self.sidebar_file_list.blockSignals(False)
         self.proxy_model.set_file_filter(None)
+        self._refresh_context_bar()
 
     def _refresh_diagnostics_banner(self, session: PackageSession) -> None:
         if not session.warnings and not session.file_diagnostics:
@@ -1037,13 +1202,43 @@ class MainWindow(QMainWindow):
 
     def _on_status_filter_changed(self) -> None:
         mode = cast(StatusFilterMode, self.status_filter_combo.currentData() or "all")
+        self.sidebar_status_list.blockSignals(True)
+        self.sidebar_status_list.setCurrentRow(self.status_filter_combo.currentIndex())
+        self.sidebar_status_list.blockSignals(False)
         self.proxy_model.set_status_filter(mode)
+        self._refresh_context_bar()
+
+    def _on_sidebar_status_changed(self, row: int) -> None:
+        if row >= 0 and row < self.status_filter_combo.count():
+            self.status_filter_combo.setCurrentIndex(row)
 
     def _apply_debounced_search(self) -> None:
         self.proxy_model.set_search_query(self.search_input.text())
+        self._refresh_context_bar()
 
     def _on_file_filter_changed(self) -> None:
+        self.sidebar_file_list.blockSignals(True)
+        self.sidebar_file_list.setCurrentRow(self.file_filter_combo.currentIndex())
+        self.sidebar_file_list.blockSignals(False)
         self.proxy_model.set_file_filter(self.file_filter_combo.currentData())
+        self._refresh_context_bar()
+
+    def _on_sidebar_file_changed(self, row: int) -> None:
+        if row >= 0 and row < self.file_filter_combo.count():
+            self.file_filter_combo.setCurrentIndex(row)
+
+    def _toggle_sidebar(self, checked: bool) -> None:
+        self.sidebar_panel.setVisible(checked)
+
+    def _on_density_toggled(self, compact: bool) -> None:
+        self.table.verticalHeader().setMinimumSectionSize(34 if compact else 44)
+        self.table.resizeRowsToContents()
+
+    def _refresh_context_bar(self) -> None:
+        file_lbl = self.file_filter_combo.currentText() or "All files"
+        status_lbl = self.status_filter_combo.currentText() or "All"
+        self.context_breadcrumb_label.setText(f"{file_lbl} / {status_lbl}")
+        self.context_count_badge.setText(f"{self.proxy_model.rowCount()} keys shown")
 
     def _toggle_inspector(self, checked: bool) -> None:
         self.inspector_panel.setVisible(checked)
@@ -1159,6 +1354,7 @@ class MainWindow(QMainWindow):
                 custom_enrichers=self.session.custom_enrichers,
                 glossary_entries=self.merged_glossary(),
                 editable_base=True,
+                tokens=self.theme_manager.tokens,
             )
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 new_val = dlg.edited_text()
@@ -1183,6 +1379,7 @@ class MainWindow(QMainWindow):
             self,
             custom_enrichers=self.session.custom_enrichers,
             glossary_entries=self.merged_glossary(),
+            tokens=self.theme_manager.tokens,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             new_val = dlg.edited_text()

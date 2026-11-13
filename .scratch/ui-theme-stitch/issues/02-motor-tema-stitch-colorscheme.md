@@ -4,10 +4,10 @@
 
 **Blocked by:** 01: Protótipo comparativo ao vivo com identidade Stitch (Qt 6 Nativo vs `qt-material`)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] O app inicia com o tema centralizado aplicado de forma consistente em toda a janela principal, barra de ferramentas, menus, inputs e barras de status.
-- [ ] Quando configurado em modo Auto, alternar o tema Claro/Escuro do sistema operacional atualiza a interface imediatamente sem reiniciar.
-- [ ] O usuário consegue escolher manualmente entre Auto, Claro e Escuro na interface, e a escolha é preservada ao reabrir o aplicativo.
-- [ ] Testes automatizados cobrem a resolução de tema (Auto/Claro/Escuro) e a inicialização limpa da aplicação.
+- [x] O app inicia com o tema centralizado aplicado de forma consistente em toda a janela principal, barra de ferramentas, menus, inputs e barras de status.
+- [x] Quando configurado em modo Auto, alternar o tema Claro/Escuro do sistema operacional atualiza a interface imediatamente sem reiniciar.
+- [x] O usuário consegue escolher manualmente entre Auto, Claro e Escuro na interface, e a escolha é preservada ao reabrir o aplicativo.
+- [x] Testes automatizados cobrem a resolução de tema (Auto/Claro/Escuro) e a inicialização limpa da aplicação.
 

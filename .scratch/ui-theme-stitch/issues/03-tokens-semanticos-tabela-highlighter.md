@@ -4,10 +4,10 @@
 
 **Blocked by:** 02: Motor de tema centralizado com paleta Stitch (Claro/Escuro) e `QStyleHints.colorScheme()`
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Todos os estados de célula (`OK`, `EDITED`, `STALE`, `EMPTY`, `MISSING`, `ORPHAN`, `CONFLICT`, `REMOVE`) mantêm contraste legível de texto e badge nos modos Claro e Escuro.
-- [ ] O destaque de tokens e placeholders no editor inline e no editor expandido adapta suas cores ao tema ativo sem perder legibilidade.
-- [ ] Trocar de tema (manual ou via sistema) repinta imediatamente as células visíveis e atualiza o editor aberto sem artefatos visuais.
-- [ ] Testes automatizados validam o mapeamento de tokens semânticos para Claro e Escuro em todos os estados de célula.
+- [x] Todos os estados de célula (`OK`, `EDITED`, `STALE`, `EMPTY`, `MISSING`, `ORPHAN`, `CONFLICT`, `REMOVE`) mantêm contraste legível de texto e badge nos modos Claro e Escuro.
+- [x] O destaque de tokens e placeholders no editor inline e no editor expandido adapta suas cores ao tema ativo sem perder legibilidade.
+- [x] Trocar de tema (manual ou via sistema) repinta imediatamente as células visíveis e atualiza o editor aberto sem artefatos visuais.
+- [x] Testes automatizados validam o mapeamento de tokens semânticos para Claro e Escuro em todos os estados de célula.
 

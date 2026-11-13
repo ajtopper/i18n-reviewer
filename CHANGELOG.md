@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-12
+
+### Added
+
+- **Native Qt 6 Design System & Light/Dark Theme Engine:**
+  - Centralized Stitch-inspired emerald/neutral palette using Qt 6 `Fusion` style, `QPalette`, and modular QSS (`app/ui/theme.py`).
+  - Automatic OS Light/Dark mode detection and live updates via `QStyleHints.colorScheme()`, plus a manual `Auto / Light / Dark` selector persisted in `settings.json`.
+  - Theme-aware semantic color tokens for `StatusCellDelegate` status badges/stripes and `TokenHighlighter` syntax highlighting.
+- **UI Layout Redesign & Vector Iconography:**
+  - Collapsible left sidebar with synchronized quick status filters and package JSON file list.
+  - Table context sub-bar displaying active filter breadcrumbs, live filtered key count pill, and `Compact` row-density toggle.
+  - Card-based Inspector layout (`Key Metadata & Location`, `Validation & Diagnostics`, and action footer with highlighted `Mark Reviewed + Next`).
+  - Adaptive vector icons across toolbar, sidebar, and action buttons via `QtAwesome`.
+  - Live comparison prototype script (`scripts/ui_prototype.py`).
+
+### Changed
+
+- Removed hardcoded light-only inline stylesheets from banners, `StatusCellDelegate`, `TokenHighlighter`, and `ExpandedEditorDialog` so all surfaces adapt cleanly to Dark mode.
+
 ## [0.1.0] - 2026-11-12
 
 Initial release of **i18n Reviewer** for Foundry VTT users, translators, and module/system developers.
