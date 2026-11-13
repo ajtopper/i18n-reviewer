@@ -11,45 +11,48 @@ from app.core.validator import CustomEnricherRule
 from app.ui.glossary_dialog import GlossaryCellContext, attach_ctrl_space_glossary_popup
 from app.ui.highlighter import TokenHighlighter
 from app.ui.table_model import BASE_ISSUES_ROLE
+from app.ui.theme import LIGHT_TOKENS, ThemeTokens
 
 
-_KIND_BADGES: dict[CellKind, tuple[str, str, str]] = {
-    CellKind.MISSING: ("#f3f4f6", "MISSING", "#6b7280"),
-    CellKind.EMPTY: ("#ffedd5", "[empty]", "#c2410c"),
-    CellKind.SAME_AS_BASE: ("#eff6ff", "= base", "#1d4ed8"),
-    CellKind.ORPHAN: ("#fef3c7", "ORPHAN", "#b45309"),
-    CellKind.NON_STRING: ("#e5e7eb", "[non-string]", "#4b5563"),
-    CellKind.STRUCTURAL_CONFLICT: ("#fee2e2", "CONFLICT", "#b91c1c"),
-    CellKind.NOT_APPLICABLE: ("#f9fafb", "", ""),
+_KIND_TO_BADGE_KEY: dict[CellKind, str] = {
+    CellKind.MISSING: "MISSING",
+    CellKind.EMPTY: "EMPTY",
+    CellKind.SAME_AS_BASE: "SAME_AS_BASE",
+    CellKind.ORPHAN: "ORPHAN",
+    CellKind.NON_STRING: "NON_STRING",
+    CellKind.STRUCTURAL_CONFLICT: "CONFLICT",
+    CellKind.NOT_APPLICABLE: "NOT_APPLICABLE",
 }
 
 
-def _resolve_cell_style(cell: CellData) -> tuple[str, str, str]:
+def _resolve_cell_style(cell: CellData, tokens: ThemeTokens = LIGHT_TOKENS) -> tuple[str, str, str]:
+    badges = tokens.badge_colors
     if cell.is_base_cell:
         if cell.kind in (CellKind.NON_STRING, CellKind.STRUCTURAL_CONFLICT, CellKind.NOT_APPLICABLE):
-            return _KIND_BADGES[cell.kind]
+            return badges[_KIND_TO_BADGE_KEY[cell.kind]]
         if cell.is_dirty:
-            return ("#fef9c3", "EDITED", "#b45309")
+            return badges["EDITED"]
         if cell.kind == CellKind.EMPTY:
-            return _KIND_BADGES[CellKind.EMPTY]
+            return badges["EMPTY"]
         if cell.is_missing:
-            return _KIND_BADGES[CellKind.MISSING]
+            return badges["MISSING"]
         return ("", "", "")
     if cell.marked_for_deletion:
-        return ("#fee2e2", "REMOVE", "#b91c1c")
+        return badges["REMOVE"]
     if cell.is_missing:
-        return _KIND_BADGES[CellKind.MISSING]
+        return badges["MISSING"]
     if cell.kind in (CellKind.NON_STRING, CellKind.STRUCTURAL_CONFLICT, CellKind.NOT_APPLICABLE):
-        return _KIND_BADGES[cell.kind]
+        return badges[_KIND_TO_BADGE_KEY[cell.kind]]
     if cell.is_dirty:
         if cell.review_status == "reviewed":
-            return ("#fef9c3", "EDITED · OK", "#a16207")
-        return ("#fef9c3", "EDITED", "#b45309")
+            return badges["EDITED_OK"]
+        return badges["EDITED"]
     if cell.review_status == "stale":
-        return ("#ede9fe", "STALE", "#6d28d9")
+        return badges["STALE"]
     if cell.review_status == "reviewed":
-        return ("#dcfce7", "OK", "#15803d")
-    return _KIND_BADGES.get(cell.kind, ("", "", ""))
+        return badges["OK"]
+    key = _KIND_TO_BADGE_KEY.get(cell.kind)
+    return badges[key] if key else ("", "", "")
 
 
 class StatusCellDelegate(QStyledItemDelegate):
@@ -65,14 +68,20 @@ class StatusCellDelegate(QStyledItemDelegate):
         live_text_changed: Callable[[CellData, str], None] | None = None,
         glossary_context_getter: Callable[[QModelIndex | QPersistentModelIndex], GlossaryCellContext]
         | None = None,
+        tokens: ThemeTokens | None = None,
     ) -> None:
         super().__init__(parent)
         self._height_cache: dict[tuple[int, int, int, str], int] = {}
         self._custom_enrichers_getter = custom_enrichers_getter
         self._live_text_changed = live_text_changed
         self._glossary_context_getter = glossary_context_getter
+        self._tokens = tokens or LIGHT_TOKENS
         self._cursor_positions: dict[int, int] = {}
         self._populating_editor = False
+
+    def set_theme(self, tokens: ThemeTokens) -> None:
+        """Update delegate colors from ThemeTokens."""
+        self._tokens = tokens
 
     def cursor_pos_for(self, cell: CellData) -> int | None:
         """Return last known editor cursor offset for a cell, if any."""
@@ -122,12 +131,12 @@ class StatusCellDelegate(QStyledItemDelegate):
                 if isinstance(base_issues, list) and base_issues:
                     painter.save()
                     stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
-                    painter.fillRect(stripe, QColor("#3b82f6"))
+                    painter.fillRect(stripe, QColor(self._tokens.stripe_info))
                     painter.restore()
             return
 
         painter.save()
-        bg_hex, badge_text, badge_hex = _resolve_cell_style(cell)
+        bg_hex, badge_text, badge_hex = _resolve_cell_style(cell, self._tokens)
 
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         if bg_hex and not selected:
@@ -140,13 +149,13 @@ class StatusCellDelegate(QStyledItemDelegate):
         val_sev = cell.validation_severity
         if cell.kind == CellKind.STRUCTURAL_CONFLICT or val_sev == "critical":
             stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
-            painter.fillRect(stripe, QColor("#dc2626"))
+            painter.fillRect(stripe, QColor(self._tokens.stripe_critical))
         elif val_sev == "warning" or cell.kind in (CellKind.EMPTY, CellKind.ORPHAN, CellKind.NON_STRING):
             stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
-            painter.fillRect(stripe, QColor("#f59e0b"))
+            painter.fillRect(stripe, QColor(self._tokens.stripe_warning))
         elif index.column() == 1 and index.data(BASE_ISSUES_ROLE):
             stripe = QRect(option.rect.left(), option.rect.top(), 4, option.rect.height())
-            painter.fillRect(stripe, QColor("#3b82f6"))
+            painter.fillRect(stripe, QColor(self._tokens.stripe_info))
 
         if badge_text:
             font = QFont("Segoe UI", 7, QFont.Weight.Bold)
@@ -170,7 +179,7 @@ class StatusCellDelegate(QStyledItemDelegate):
         editor = QPlainTextEdit(parent)
         editor.setTabChangesFocus(True)
         rules = self._custom_enrichers_getter() if self._custom_enrichers_getter else []
-        TokenHighlighter(editor.document(), custom_enrichers=rules)
+        TokenHighlighter(editor.document(), custom_enrichers=rules, tokens=self._tokens)
         cell = index.data(Qt.ItemDataRole.UserRole)
         if isinstance(cell, CellData):
             def _on_cursor_changed(c: CellData = cell, ed: QPlainTextEdit = editor) -> None:
