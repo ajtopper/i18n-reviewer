@@ -233,17 +233,15 @@ def import_glossary_csv(path: Path) -> list[GlossaryEntry]:
     return entries
 
 
-def _unmask_enricher_part(chars: list[str], tok_start: int, raw: str, part: str) -> None:
-    """Locate translatable part inside its syntactic slot rather than anywhere in technical body."""
+def _enricher_unmask_range(tok_start: int, raw: str, part: str) -> tuple[int, int] | None:
+    """Locate translatable part span inside its syntactic slot rather than anywhere in technical body."""
     if not part:
-        return
+        return None
     # 1) Trailing {label} after closing bracket
     suffix = "{" + part + "}"
     if raw.endswith(suffix):
         rel = len(raw) - len(part) - 1
-        for offset, ch in enumerate(part):
-            chars[tok_start + rel + offset] = ch
-        return
+        return tok_start + rel, tok_start + rel + len(part)
     # 2) @Embed caption="..." or @Check name:... or [[... #flavor]]
     for pat in (
         re.compile(r'\bcaption\s*=\s*["\'](' + re.escape(part) + r')["\']', re.IGNORECASE),
@@ -252,9 +250,29 @@ def _unmask_enricher_part(chars: list[str], tok_start: int, raw: str, part: str)
     ):
         m = pat.search(raw)
         if m:
-            for offset, ch in enumerate(part):
-                chars[tok_start + m.start(1) + offset] = ch
-            return
+            return tok_start + m.start(1), tok_start + m.end(1)
+    return None
+
+
+def technical_char_mask(
+    text: str,
+    custom_enrichers: list[CustomEnricherRule] | None = None,
+) -> list[bool]:
+    """Return per-character mask where True marks protected technical spans (excluding translatable labels)."""
+    if not text:
+        return []
+    flags = [False] * len(text)
+    tokens = extract_protected_tokens(text, custom_enrichers=custom_enrichers)
+    for tok in tokens:
+        for idx in range(max(0, tok.start), min(len(text), tok.end)):
+            flags[idx] = True
+        if tok.kind == "enricher":
+            for part in tok.translatable_parts:
+                span = _enricher_unmask_range(tok.start, tok.raw, part)
+                if span is not None:
+                    for idx in range(max(0, span[0]), min(len(text), span[1])):
+                        flags[idx] = False
+    return flags
 
 
 def mask_technical_spans(
@@ -264,15 +282,8 @@ def mask_technical_spans(
     """Replace technical spans extracted by Ticket 05 with spaces while preserving translatable labels."""
     if not text:
         return ""
-    tokens = extract_protected_tokens(text, custom_enrichers=custom_enrichers)
-    chars = list(text)
-    for tok in tokens:
-        for idx in range(tok.start, tok.end):
-            chars[idx] = " "
-        if tok.kind == "enricher":
-            for part in tok.translatable_parts:
-                _unmask_enricher_part(chars, tok.start, tok.raw, part)
-    return "".join(chars)
+    mask = technical_char_mask(text, custom_enrichers=custom_enrichers)
+    return "".join(" " if is_tech else ch for ch, is_tech in zip(text, mask))
 
 
 def mask_glossary_phrases(

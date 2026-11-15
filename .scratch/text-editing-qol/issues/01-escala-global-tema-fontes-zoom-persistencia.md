@@ -4,9 +4,9 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Atalhos `Ctrl++` / `Ctrl+=` (teclado principal e numérico) aumentam o zoom, `Ctrl+-` reduz e `Ctrl+0` restaura para 100%, respeitando os limites mínimo e máximo definidos.
-- [ ] Fontes, espaçamentos e controles de janela principal, menus, barra de ferramentas e diálogos (incluindo o Editor Expandido) escalam imediatamente com o fator de zoom tanto no modo Claro quanto no Escuro.
-- [ ] O nível de zoom atual fica visível para o usuário e a preferência é salva e restaurada automaticamente nas configurações do aplicativo ao reabrir.
-- [ ] Testes automatizados cobrem limites de zoom, atalhos, aplicação de tema escalado e persistência da preferência.
+- [x] Atalhos `Ctrl++` / `Ctrl+=` (teclado principal e numérico) aumentam o zoom, `Ctrl+-` reduz e `Ctrl+0` restaura para 100%, respeitando os limites mínimo e máximo definidos.
+- [x] Fontes, espaçamentos e controles de janela principal, menus, barra de ferramentas e diálogos (incluindo o Editor Expandido) escalam imediatamente com o fator de zoom tanto no modo Claro quanto no Escuro.
+- [x] O nível de zoom atual fica visível para o usuário e a preferência é salva e restaurada automaticamente nas configurações do aplicativo ao reabrir.
+- [x] Testes automatizados cobrem limites de zoom, atalhos, aplicação de tema escalado e persistência da preferência.

@@ -2,16 +2,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 from typing import Literal
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPalette
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QKeyEvent, QPalette
 from PySide6.QtWidgets import QApplication
 import qtawesome as qta
 
 ThemeMode = Literal["auto", "light", "dark"]
 VALID_THEME_MODES: tuple[ThemeMode, ...] = ("auto", "light", "dark")
+
+DEFAULT_ZOOM_FACTOR = 1.0
+MIN_ZOOM_FACTOR = 0.8
+MAX_ZOOM_FACTOR = 2.0
+ZOOM_STEP = 0.1
+
+
+def clamp_zoom_factor(value: float) -> float:
+    """Clamp and quantize a UI zoom factor to supported bounds [0.8, 2.0]."""
+    if not math.isfinite(value):
+        return DEFAULT_ZOOM_FACTOR
+    clamped = max(MIN_ZOOM_FACTOR, min(MAX_ZOOM_FACTOR, float(value)))
+    return round(clamped, 1)
 
 
 @dataclass(frozen=True)
@@ -196,27 +210,32 @@ def build_palette(tokens: ThemeTokens) -> QPalette:
     return palette
 
 
-def build_qss(tokens: ThemeTokens) -> str:
-    """Build the application QSS stylesheet from ThemeTokens."""
+def build_qss(tokens: ThemeTokens, zoom: float = DEFAULT_ZOOM_FACTOR) -> str:
+    """Build the application QSS stylesheet from ThemeTokens and zoom scale factor."""
+    z = clamp_zoom_factor(zoom)
+
+    def _px(base: float, minimum: int = 1) -> int:
+        return max(minimum, round(base * z))
+
     return f"""
     QMainWindow, QDialog, QWidget {{
         background-color: {tokens.bg_surface};
         color: {tokens.text_primary};
         font-family: "Inter", "Segoe UI", sans-serif;
-        font-size: 13px;
+        font-size: {_px(13, 9)}px;
     }}
     QToolBar {{
         background-color: {tokens.bg_container_lowest};
         border-bottom: 1px solid {tokens.border_subtle};
-        spacing: 6px;
-        padding: 6px 10px;
+        spacing: {_px(6, 3)}px;
+        padding: {_px(6, 3)}px {_px(10, 5)}px;
     }}
     QToolBar QToolButton {{
         background-color: transparent;
         color: {tokens.text_primary};
         border: 1px solid transparent;
-        border-radius: 6px;
-        padding: 4px 8px;
+        border-radius: {_px(6, 3)}px;
+        padding: {_px(4, 2)}px {_px(8, 4)}px;
     }}
     QToolBar QToolButton:hover {{
         background-color: {tokens.bg_container_high};
@@ -237,11 +256,11 @@ def build_qss(tokens: ThemeTokens) -> str:
     QFrame#InspectorCard {{
         background-color: {tokens.bg_container_lowest};
         border: 1px solid {tokens.border_subtle};
-        border-radius: 8px;
+        border-radius: {_px(8, 4)}px;
     }}
     QLabel#SectionHeader {{
         color: {tokens.text_muted};
-        font-size: 11px;
+        font-size: {_px(11, 8)}px;
         font-weight: 600;
         text-transform: uppercase;
         background: transparent;
@@ -249,25 +268,25 @@ def build_qss(tokens: ThemeTokens) -> str:
     QLabel#KeyChip {{
         background-color: {tokens.bg_container_low};
         color: {tokens.primary};
-        border-radius: 4px;
-        padding: 6px 8px;
+        border-radius: {_px(4, 2)}px;
+        padding: {_px(6, 3)}px {_px(8, 4)}px;
         font-family: "JetBrains Mono", "Consolas", monospace;
-        font-size: 12px;
+        font-size: {_px(12, 8)}px;
     }}
     QLabel#PillBadge {{
         background-color: {tokens.secondary_container};
         color: {tokens.on_secondary_container};
-        border-radius: 10px;
-        padding: 2px 8px;
-        font-size: 11px;
+        border-radius: {_px(10, 5)}px;
+        padding: {_px(2, 1)}px {_px(8, 4)}px;
+        font-size: {_px(11, 8)}px;
         font-weight: 600;
     }}
     QLineEdit, QComboBox, QPlainTextEdit, QTextEdit, QSpinBox {{
         background-color: {tokens.bg_container_low};
         color: {tokens.text_primary};
         border: 1px solid {tokens.border_subtle};
-        border-radius: 6px;
-        padding: 4px 8px;
+        border-radius: {_px(6, 3)}px;
+        padding: {_px(4, 2)}px {_px(8, 4)}px;
     }}
     QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{
         border: 1px solid {tokens.primary};
@@ -277,8 +296,8 @@ def build_qss(tokens: ThemeTokens) -> str:
         background-color: {tokens.bg_container};
         color: {tokens.text_primary};
         border: 1px solid {tokens.border_subtle};
-        border-radius: 6px;
-        padding: 5px 10px;
+        border-radius: {_px(6, 3)}px;
+        padding: {_px(5, 2)}px {_px(10, 5)}px;
         font-weight: 500;
     }}
     QPushButton:hover {{
@@ -294,7 +313,7 @@ def build_qss(tokens: ThemeTokens) -> str:
         color: {tokens.on_primary};
         border: none;
         font-weight: 600;
-        padding: 6px 12px;
+        padding: {_px(6, 3)}px {_px(12, 6)}px;
     }}
     QPushButton#PrimaryCTA:hover {{
         background-color: {tokens.primary_hover};
@@ -308,12 +327,12 @@ def build_qss(tokens: ThemeTokens) -> str:
     QListWidget {{
         background-color: transparent;
         border: 1px solid {tokens.border_subtle};
-        border-radius: 6px;
+        border-radius: {_px(6, 3)}px;
         outline: none;
     }}
     QListWidget::item {{
-        padding: 5px 8px;
-        border-radius: 4px;
+        padding: {_px(5, 2)}px {_px(8, 4)}px;
+        border-radius: {_px(4, 2)}px;
         color: {tokens.text_secondary};
     }}
     QListWidget::item:hover {{
@@ -338,70 +357,115 @@ def build_qss(tokens: ThemeTokens) -> str:
         border: none;
         border-bottom: 1px solid {tokens.border_subtle};
         border-right: 1px solid {tokens.border_subtle};
-        padding: 6px 8px;
-        font-size: 11px;
+        padding: {_px(6, 3)}px {_px(8, 4)}px;
+        font-size: {_px(11, 8)}px;
         font-weight: 600;
         text-transform: uppercase;
+    }}
+    QMenu {{
+        background-color: {tokens.bg_container_lowest};
+        color: {tokens.text_primary};
+        border: 1px solid {tokens.border_subtle};
+        padding: {_px(4, 2)}px;
+    }}
+    QMenu::item {{
+        padding: {_px(5, 3)}px {_px(14, 8)}px;
+        border-radius: {_px(4, 2)}px;
+    }}
+    QMenu::item:selected {{
+        background-color: {tokens.primary};
+        color: {tokens.on_primary};
     }}
     QProgressBar {{
         background-color: {tokens.bg_container};
         border: none;
-        border-radius: 4px;
-        height: 8px;
+        border-radius: {_px(4, 2)}px;
+        height: {_px(8, 4)}px;
         text-align: center;
     }}
     QProgressBar::chunk {{
         background-color: {tokens.primary};
-        border-radius: 4px;
+        border-radius: {_px(4, 2)}px;
     }}
     QStatusBar {{
         background-color: {tokens.bg_container_low};
         border-top: 1px solid {tokens.border_subtle};
         color: {tokens.text_secondary};
     }}
+    QPushButton#ZoomPill {{
+        background-color: transparent;
+        border: 1px solid {tokens.border_subtle};
+        border-radius: {_px(4, 2)}px;
+        padding: {_px(2, 1)}px {_px(8, 4)}px;
+        font-size: {_px(11, 8)}px;
+        font-weight: 600;
+        color: {tokens.text_secondary};
+    }}
+    QPushButton#ZoomPill:hover {{
+        background-color: {tokens.bg_container_high};
+        color: {tokens.text_primary};
+    }}
     """
+
+
+def _read_settings_dict(app_data_dir: Path) -> dict[str, object]:
+    settings_path = app_data_dir / "settings.json"
+    if not settings_path.exists():
+        return {}
+    try:
+        loaded = json.loads(settings_path.read_text(encoding="utf-8-sig"))
+        if isinstance(loaded, dict):
+            return loaded
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _save_settings_key(app_data_dir: Path, key: str, value: object) -> None:
+    app_data_dir.mkdir(parents=True, exist_ok=True)
+    data = _read_settings_dict(app_data_dir)
+    data[key] = value
+    settings_path = app_data_dir / "settings.json"
+    settings_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def load_theme_preference(app_data_dir: Path) -> ThemeMode:
     """Load the persisted ui_theme preference from settings.json, defaulting to 'auto'."""
-    settings_path = app_data_dir / "settings.json"
-    if not settings_path.exists():
-        return "auto"
-    try:
-        data = json.loads(settings_path.read_text(encoding="utf-8-sig"))
-        val = data.get("ui_theme")
-        if val in VALID_THEME_MODES:
-            return val
-    except (OSError, ValueError):
-        pass
+    val = _read_settings_dict(app_data_dir).get("ui_theme")
+    if val in VALID_THEME_MODES:
+        return val
     return "auto"
 
 
 def save_theme_preference(app_data_dir: Path, mode: ThemeMode) -> None:
     """Persist ui_theme into settings.json while preserving existing settings keys."""
-    app_data_dir.mkdir(parents=True, exist_ok=True)
-    settings_path = app_data_dir / "settings.json"
-    data: dict[str, object] = {}
-    if settings_path.exists():
-        try:
-            loaded = json.loads(settings_path.read_text(encoding="utf-8-sig"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except (OSError, ValueError):
-            data = {}
-    data["ui_theme"] = mode
-    settings_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    _save_settings_key(app_data_dir, "ui_theme", mode)
+
+
+def load_zoom_preference(app_data_dir: Path) -> float:
+    """Load the persisted ui_zoom factor from settings.json, defaulting to 1.0."""
+    val = _read_settings_dict(app_data_dir).get("ui_zoom")
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return clamp_zoom_factor(float(val))
+    return DEFAULT_ZOOM_FACTOR
+
+
+def save_zoom_preference(app_data_dir: Path, zoom: float) -> None:
+    """Persist ui_zoom into settings.json while preserving existing settings keys."""
+    _save_settings_key(app_data_dir, "ui_zoom", clamp_zoom_factor(zoom))
 
 
 class ThemeManager(QObject):
-    """Applies Native Qt 6 Fusion + QPalette + QSS and tracks OS colorScheme changes."""
+    """Applies Native Qt 6 Fusion + QPalette + QSS + UI zoom and tracks OS colorScheme changes."""
 
     theme_changed = Signal(object)
+    zoom_changed = Signal(float)
 
     def __init__(self, app_data_dir: Path, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.app_data_dir = app_data_dir
         self._mode: ThemeMode = load_theme_preference(app_data_dir)
+        self._zoom: float = load_zoom_preference(app_data_dir)
         self._tokens: ThemeTokens = tokens_for_mode(self._mode)
         hints = QGuiApplication.styleHints()
         if hasattr(hints, "colorSchemeChanged"):
@@ -412,18 +476,27 @@ class ThemeManager(QObject):
         return self._mode
 
     @property
+    def zoom(self) -> float:
+        return self._zoom
+
+    @property
+    def zoom_percent(self) -> int:
+        return round(self._zoom * 100)
+
+    @property
     def tokens(self) -> ThemeTokens:
         return self._tokens
 
     def apply(self) -> ThemeTokens:
-        """Apply Fusion style, QPalette, and QSS to the active QApplication."""
+        """Apply Fusion style, QPalette, and scaled QSS to the active QApplication."""
         self._tokens = tokens_for_mode(self._mode)
         app = QApplication.instance()
         if isinstance(app, QApplication):
             app.setStyle("Fusion")
             app.setPalette(build_palette(self._tokens))
-            app.setStyleSheet(build_qss(self._tokens))
+            app.setStyleSheet(build_qss(self._tokens, zoom=self._zoom))
         self.theme_changed.emit(self._tokens)
+        self.zoom_changed.emit(self._zoom)
         return self._tokens
 
     def set_mode(self, mode: ThemeMode, persist: bool = True) -> ThemeTokens:
@@ -433,9 +506,52 @@ class ThemeManager(QObject):
             save_theme_preference(self.app_data_dir, mode)
         return self.apply()
 
+    def set_zoom(self, zoom: float, persist: bool = True) -> float:
+        """Update UI zoom factor, optionally persist it, and re-apply scaled QSS."""
+        clamped = clamp_zoom_factor(zoom)
+        changed = clamped != self._zoom
+        self._zoom = clamped
+        if persist:
+            save_zoom_preference(self.app_data_dir, clamped)
+        if changed:
+            self.apply()
+        return self._zoom
+
+    def zoom_in(self, persist: bool = True) -> float:
+        """Increase UI zoom by one step."""
+        return self.set_zoom(self._zoom + ZOOM_STEP, persist=persist)
+
+    def zoom_out(self, persist: bool = True) -> float:
+        """Decrease UI zoom by one step."""
+        return self.set_zoom(self._zoom - ZOOM_STEP, persist=persist)
+
+    def reset_zoom(self, persist: bool = True) -> float:
+        """Reset UI zoom back to 100%."""
+        return self.set_zoom(DEFAULT_ZOOM_FACTOR, persist=persist)
+
     def _on_system_scheme_changed(self, _scheme: Qt.ColorScheme) -> None:
         if self._mode == "auto":
             self.apply()
+
+
+def handle_zoom_key_event(event: QKeyEvent, theme_manager: ThemeManager) -> bool:
+    """Handle Ctrl++ / Ctrl+= / Ctrl+- / Ctrl+0 zoom shortcuts consistently across windows."""
+    mods = event.modifiers()
+    if not (mods & Qt.KeyboardModifier.ControlModifier):
+        return False
+    if mods & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier):
+        return False
+    key = event.key()
+    if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+        theme_manager.zoom_in()
+        return True
+    if key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
+        theme_manager.zoom_out()
+        return True
+    if key == Qt.Key.Key_0:
+        theme_manager.reset_zoom()
+        return True
+    return False
 
 
 def theme_icon(name: str, color: str) -> QIcon:

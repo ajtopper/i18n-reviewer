@@ -4,9 +4,9 @@
 
 **Blocked by:** 03: Localizar e Substituir interativo (`Ctrl+H`) com proteção de spans técnicos
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A interface exibe contagem prévia em tempo real de células/ocorrências elegíveis e indica quantas ocorrências foram preservadas pela proteção de tokens ou células não editáveis.
-- [ ] *Replace All* aplica todas as substituições elegíveis em uma única macro da pilha de Undo/Redo, permitindo desfazer (`Ctrl+Z`) e refazer (`Ctrl+Y`) todo o lote de uma só vez.
-- [ ] Células alteradas em lote têm `dirty` atualizado, rebaixam `review_status` para `unreviewed`, acionam revalidação completa e gravam o rascunho de recuperação sem corromper tokens técnicos ou células somente leitura.
-- [ ] Changelog atualizado para a versão `v0.2.5` e testes automatizados cobrem contagem prévia, lote com proteção de tokens, rebaixamento de status e Undo/Redo único.
+- [x] A interface exibe contagem prévia em tempo real de células/ocorrências elegíveis e indica quantas ocorrências foram preservadas pela proteção de tokens ou células não editáveis.
+- [x] *Replace All* aplica todas as substituições elegíveis em uma única macro da pilha de Undo/Redo, permitindo desfazer (`Ctrl+Z`) e refazer (`Ctrl+Y`) todo o lote de uma só vez.
+- [x] Células alteradas em lote têm `dirty` atualizado, rebaixam `review_status` para `unreviewed`, acionam revalidação completa e gravam o rascunho de recuperação sem corromper tokens técnicos ou células somente leitura.
+- [x] Changelog atualizado para a versão `v0.2.5` e testes automatizados cobrem contagem prévia, lote com proteção de tokens, rebaixamento de status e Undo/Redo único.

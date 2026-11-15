@@ -231,7 +231,7 @@ class SpellService:
                 del self._word_cache[k]
         return True
 
-    def check_text(
+    def find_unknown_word_spans(
         self,
         lang: str,
         target_text: str | None,
@@ -239,8 +239,10 @@ class SpellService:
         base_text: str | None = None,
         glossary_entries: list[GlossaryEntry] | None = None,
         custom_enrichers: list[CustomEnricherRule] | None = None,
-    ) -> list[str]:
-        """Return ordered unknown words in target_text after filtering tech spans, noise, base words, and glossary."""
+        ignored_warnings: list[IgnoredWarning] | None = None,
+        key_path: str = "",
+    ) -> list[tuple[int, int, str]]:
+        """Return all (start, end, word) spans of unknown words in target_text."""
         if not target_text or not self.is_available(lang):
             return []
 
@@ -255,9 +257,15 @@ class SpellService:
                 base_words_folded.add(btok.casefold())
                 base_words_folded.add(btok.strip("-'’").casefold())
 
-        unknown: list[str] = []
-        seen: set[str] = set()
-        for word in _WORD_RE.findall(masked):
+        ignored_map = (
+            build_ignored_map(ignored_warnings, key_path, lang, target_text)
+            if ignored_warnings and key_path
+            else {}
+        )
+
+        spans: list[tuple[int, int, str]] = []
+        for match in _WORD_RE.finditer(masked):
+            word = match.group(0)
             clean = word.strip("-'’")
             if not clean or len(clean) <= 2:
                 continue
@@ -268,9 +276,33 @@ class SpellService:
             norm_key = word.casefold()
             if norm_key in base_words_folded or clean.casefold() in base_words_folded:
                 continue
-            if norm_key in seen:
+            if f"spell:{word}" in ignored_map:
                 continue
             if not self.check(lang, word):
+                spans.append((match.start(), match.end(), word))
+        return spans
+
+    def check_text(
+        self,
+        lang: str,
+        target_text: str | None,
+        *,
+        base_text: str | None = None,
+        glossary_entries: list[GlossaryEntry] | None = None,
+        custom_enrichers: list[CustomEnricherRule] | None = None,
+    ) -> list[str]:
+        """Return ordered unknown words in target_text after filtering tech spans, noise, base words, and glossary."""
+        unknown: list[str] = []
+        seen: set[str] = set()
+        for _start, _end, word in self.find_unknown_word_spans(
+            lang,
+            target_text,
+            base_text=base_text,
+            glossary_entries=glossary_entries,
+            custom_enrichers=custom_enrichers,
+        ):
+            norm_key = word.casefold()
+            if norm_key not in seen:
                 seen.add(norm_key)
                 unknown.append(word)
         return unknown

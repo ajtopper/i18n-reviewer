@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `Ctrl+H` abre a interface de Localizar e Substituir (com rótulos em inglês internacional), pré-selecionando o idioma/coluna ativo quando aplicável e mantendo coerência com o tema Claro/Escuro e o zoom atual.
-- [ ] A busca respeita o escopo visível da tabela (filtros de status, arquivo e pesquisa) e aplica corretamente as opções de diferenciação de maiúsculas/minúsculas e palavra inteira.
-- [ ] Com a proteção de tokens técnicos ativa, ocorrências dentro de spans protegidos nunca são substituídas, preservando intactos placeholders, handlebars, enrichers, URLs e tags HTML.
-- [ ] *Find Next* navega até a próxima célula correspondente e *Replace* aplica a substituição na célula editável atual via pilha de Undo/Redo (`Ctrl+Z` / `Ctrl+Y`), revalidando ortografia, glossário e placeholders.
-- [ ] Testes automatizados cobrem busca/substituição unitária, proteção de tokens técnicos, respeito aos filtros visíveis e Undo/Redo.
+- [x] `Ctrl+H` abre a interface de Localizar e Substituir (com rótulos em inglês internacional), pré-selecionando o idioma/coluna ativo quando aplicável e mantendo coerência com o tema Claro/Escuro e o zoom atual.
+- [x] A busca respeita o escopo visível da tabela (filtros de status, arquivo e pesquisa) e aplica corretamente as opções de diferenciação de maiúsculas/minúsculas e palavra inteira.
+- [x] Com a proteção de tokens técnicos ativa, ocorrências dentro de spans protegidos nunca são substituídas, preservando intactos placeholders, handlebars, enrichers, URLs e tags HTML.
+- [x] *Find Next* navega até a próxima célula correspondente e *Replace* aplica a substituição na célula editável atual via pilha de Undo/Redo (`Ctrl+Z` / `Ctrl+Y`), revalidando ortografia, glossário e placeholders.
+- [x] Testes automatizados cobrem busca/substituição unitária, proteção de tokens técnicos, respeito aos filtros visíveis e Undo/Redo.

@@ -9,12 +9,14 @@ from PySide6.QtCore import (
     QModelIndex,
     QObject,
     QPersistentModelIndex,
+    QSize,
     QThreadPool,
     QTimer,
     Qt,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QKeyEvent, QKeySequence, QUndoStack
+from PySide6.QtGui import QAction, QCloseEvent, QKeyEvent, QKeySequence, QResizeEvent, QUndoStack
 from PySide6.QtWidgets import (
+    QAbstractItemDelegate,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -86,6 +88,7 @@ from app.core.glossary import (
 from app.core.spell_service import SpellService
 from app.core.validator import (
     CustomEnricherRule,
+    IgnoredWarning,
     compute_value_hash,
     inspect_base_defects,
     missing_tokens_for_translation,
@@ -103,6 +106,7 @@ from app.ui.commands import (
 from app.ui.backup_dialog import BackupDialog, PublishDialog
 from app.ui.conflict_dialog import ConflictResolutionDialog
 from app.ui.delegates import StatusCellDelegate
+from app.ui.editor_assistant import EditorTextContext, attach_editor_assistant
 from app.ui.enrichers_dialog import CustomEnrichersDialog
 from app.ui.glossary_dialog import (
     GlossaryCellContext,
@@ -111,8 +115,16 @@ from app.ui.glossary_dialog import (
     open_glossary_popup_at,
 )
 from app.ui.highlighter import TokenHighlighter
+from app.ui.replace_dialog import FindReplaceDialog
 from app.ui.table_model import PackageFilterProxyModel, StatusFilterMode, TranslationTableModel
-from app.ui.theme import LIGHT_TOKENS, ThemeManager, ThemeMode, ThemeTokens, theme_icon
+from app.ui.theme import (
+    LIGHT_TOKENS,
+    ThemeManager,
+    ThemeMode,
+    ThemeTokens,
+    handle_zoom_key_event,
+    theme_icon,
+)
 from app.ui.validation_worker import (
     RowValidationResult,
     RowValidationSnapshot,
@@ -229,18 +241,32 @@ class ExpandedEditorDialog(QDialog):
         *,
         editable_base: bool = False,
         tokens: ThemeTokens | None = None,
+        theme_manager: ThemeManager | None = None,
+        spell_service: SpellService | None = None,
+        ignored_warnings: list[IgnoredWarning] | None = None,
+        on_personal_word_added: Callable[[str, str], None] | None = None,
+        on_add_glossary_term: Callable[[str, str, str], list[GlossaryEntry] | None] | None = None,
     ) -> None:
         super().__init__(parent)
         mode_title = f"{lang} (Base)" if editable_base else lang
         self.setWindowTitle(f"Expanded Editor — {key_path} ({mode_title})")
-        self.resize(820 if not editable_base else 680, 460)
+        self._theme_manager = theme_manager
+        zoom = theme_manager.zoom if theme_manager is not None else 1.0
+        base_w = 820 if not editable_base else 680
+        self.resize(round(base_w * min(zoom, 1.5)), round(460 * min(zoom, 1.5)))
         self._base_text = base_text
         self._key_path = key_path
         self._lang = lang
         self._editable_base = editable_base
         self._custom_enrichers = list(custom_enrichers or [])
         self._glossary_entries = list(glossary_entries or [])
+        self._ignored_warnings = list(ignored_warnings or [])
         self._tokens = tokens or LIGHT_TOKENS
+        self._spell_service = spell_service
+        self._on_personal_word_added = on_personal_word_added
+        self._on_add_glossary_term_cb = on_add_glossary_term
+        if theme_manager is not None:
+            self.installEventFilter(self)
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"Key: {key_path} · Language: {mode_title}"))
@@ -278,6 +304,22 @@ class ExpandedEditorDialog(QDialog):
                 ),
                 custom_enrichers_getter=lambda: self._custom_enrichers,
             )
+        self._editor_assistant = attach_editor_assistant(
+            self.target_edit,
+            context_getter=lambda: EditorTextContext(
+                key_path=self._key_path,
+                lang=self._lang,
+                base_text=self._base_text,
+                is_base_cell=self._editable_base,
+                glossary_entries=self._glossary_entries,
+                custom_enrichers=self._custom_enrichers,
+                ignored_warnings=self._ignored_warnings,
+            ),
+            spell_service=self._spell_service,
+            tokens=self._tokens,
+            on_personal_word_added=self._on_personal_word_added,
+            on_add_glossary_term=self._handle_add_glossary_term if not editable_base else None,
+        )
         self.target_edit.textChanged.connect(self._refresh_missing_strip)
         right_box.addWidget(self.target_edit)
 
@@ -295,7 +337,17 @@ class ExpandedEditorDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self._refresh_missing_strip()
+        self._editor_assistant.refresh_spelling_now()
         self.target_edit.setFocus()
+
+    def _handle_add_glossary_term(self, term: str, trans: str, lang: str) -> None:
+        if self._on_add_glossary_term_cb is None:
+            return
+        updated = self._on_add_glossary_term_cb(term, trans, lang)
+        if updated is not None:
+            self._glossary_entries = updated
+            self._refresh_missing_strip()
+            self._editor_assistant.refresh_spelling_now()
 
     def _insert_token_at_cursor(self, token: str) -> None:
         cursor = self.target_edit.textCursor()
@@ -359,6 +411,16 @@ class ExpandedEditorDialog(QDialog):
     def edited_text(self) -> str:
         return self.target_edit.toPlainText()
 
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if (
+            self._theme_manager is not None
+            and event.type() == QEvent.Type.KeyPress
+            and isinstance(event, QKeyEvent)
+            and handle_zoom_key_event(event, self._theme_manager)
+        ):
+            return True
+        return super().eventFilter(watched, event)
+
 
 class MainWindow(QMainWindow):
     """Main desktop window displaying multilingual translation table and inspector."""
@@ -371,6 +433,8 @@ class MainWindow(QMainWindow):
         self.theme_manager = ThemeManager(app_data_dir=self.app_data_dir, parent=self)
         self.theme_manager.apply()
         self.theme_manager.theme_changed.connect(self._on_theme_changed)
+        self.theme_manager.zoom_changed.connect(self._on_zoom_changed)
+        self._applied_zoom: float = self.theme_manager.zoom
         self.session: PackageSession | None = None
         self._project_unsaved: bool = False
         self.lang_checkboxes: dict[str, QCheckBox] = {}
@@ -380,6 +444,8 @@ class MainWindow(QMainWindow):
         self._global_glossary_cache: list[GlossaryEntry] = load_global_glossary(self.app_data_dir)
         self.spell_service = SpellService(app_data_dir=self.app_data_dir)
         self._table_glossary_popup: object | None = None
+        self._replace_dialog: FindReplaceDialog | None = None
+        self._batch_editing: bool = False
         self._validation_signals = ValidationSignals(self)
         self._validation_signals.batch_ready.connect(self._on_validation_batch_ready)
         self._validation_signals.finished.connect(self._on_validation_finished)
@@ -403,7 +469,16 @@ class MainWindow(QMainWindow):
         self._bind_shortcuts()
         self.table_model.cell_edited.connect(self._on_cell_edited)
         self.setStatusBar(QStatusBar())
+        self.zoom_status_button = QPushButton(f"Zoom: {self.theme_manager.zoom_percent}%")
+        self.zoom_status_button.setObjectName("ZoomPill")
+        self.zoom_status_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.zoom_status_button.setToolTip(
+            "Reset zoom to 100% (Ctrl+0) · Zoom in/out (Ctrl++ / Ctrl+-)"
+        )
+        self.zoom_status_button.clicked.connect(lambda: self.theme_manager.reset_zoom())
+        self.statusBar().addPermanentWidget(self.zoom_status_button)
         self.statusBar().showMessage("Open a Foundry module.json or system.json to begin.")
+        self._apply_zoom_layout(self.theme_manager.zoom, scale_columns=False)
 
     def _build_toolbar(self) -> None:
         self.toolbar = QToolBar("Main")
@@ -510,17 +585,22 @@ class MainWindow(QMainWindow):
             self.theme_manager.set_mode(mode)
 
     def _on_theme_changed(self, tokens: ThemeTokens) -> None:
+        z = self.theme_manager.zoom
+        p4 = max(2, round(4 * z))
+        p6 = max(3, round(6 * z))
+        p10 = max(5, round(10 * z))
+        r4 = max(2, round(4 * z))
         self.cell_delegate.set_theme(tokens)
         self.table.viewport().update()
         self.inspector_stale_label.setStyleSheet(
-            f"background: {tokens.stale_bg}; color: {tokens.stale_fg}; padding: 6px; border-radius: 4px;"
+            f"background: {tokens.stale_bg}; color: {tokens.stale_fg}; padding: {p6}px; border-radius: {r4}px;"
         )
         self.diagnostic_banner.setStyleSheet(
-            f"QLabel {{ background: {tokens.warning_bg}; color: {tokens.warning_fg}; padding: 6px 10px; "
+            f"QLabel {{ background: {tokens.warning_bg}; color: {tokens.warning_fg}; padding: {p6}px {p10}px; "
             f"border-bottom: 1px solid {tokens.warning_border}; font-weight: bold; }}"
         )
         self.external_change_banner.setStyleSheet(
-            f"QFrame {{ background: {tokens.info_bg}; border-bottom: 1px solid {tokens.info_border}; padding: 4px 10px; }}"
+            f"QFrame {{ background: {tokens.info_bg}; border-bottom: 1px solid {tokens.info_border}; padding: {p4}px {p10}px; }}"
         )
         self.external_change_label.setStyleSheet(f"color: {tokens.info_fg}; font-weight: bold;")
         self._refresh_icons(tokens)
@@ -641,6 +721,10 @@ class MainWindow(QMainWindow):
             live_text_changed=self._on_inline_text_changed,
             glossary_context_getter=self._glossary_context_for_index,
             tokens=self.theme_manager.tokens,
+            spell_service=self.spell_service,
+            editor_context_getter=self._editor_context_for_index,
+            on_personal_word_added=self._on_editor_personal_word_added,
+            on_add_glossary_term=self._on_editor_add_glossary_term,
         )
         self.table.setItemDelegate(self.cell_delegate)
         self.table.setWordWrap(True)
@@ -749,6 +833,8 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
+            if handle_zoom_key_event(event, self.theme_manager):
+                return True
             mods = event.modifiers()
             key = event.key()
             ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
@@ -762,6 +848,9 @@ class MainWindow(QMainWindow):
                 return True
             if ctrl and key == Qt.Key.Key_F:
                 self.search_input.setFocus()
+                return True
+            if ctrl and key == Qt.Key.Key_H:
+                self.open_find_replace_dialog()
                 return True
             if ctrl and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self.review_and_advance()
@@ -1115,11 +1204,13 @@ class MainWindow(QMainWindow):
         self._watch_session_files(session)
         self.external_change_banner.setVisible(False)
 
-        self.table.setColumnWidth(0, 230)
-        self.table.setColumnWidth(1, 260)
+        z = self.theme_manager.zoom
+        self.table.setColumnWidth(0, round(230 * z))
+        self.table.setColumnWidth(1, round(260 * z))
         for col in range(2, 2 + len(session.target_langs)):
-            self.table.setColumnWidth(col, 240)
+            self.table.setColumnWidth(col, round(240 * z))
             self.table.setColumnHidden(col, False)
+        self.table.resizeRowsToContents()
 
         self._rebuild_language_checkboxes(session.target_langs)
         self._rebuild_file_filter(session)
@@ -1234,14 +1325,60 @@ class MainWindow(QMainWindow):
         self.sidebar_panel.setVisible(checked)
 
     def _on_density_toggled(self, compact: bool) -> None:
-        self.table.verticalHeader().setMinimumSectionSize(34 if compact else 44)
+        self.cell_delegate.set_compact(compact)
+        self.table.verticalHeader().setMinimumSectionSize(self.cell_delegate.min_row_height())
         self.table.resizeRowsToContents()
+
+    def _on_zoom_changed(self, zoom: float) -> None:
+        self.zoom_status_button.setText(f"Zoom: {round(zoom * 100)}%")
+        self._apply_zoom_layout(zoom, scale_columns=True)
+
+    def _update_responsive_panel_bounds(self, zoom: float) -> None:
+        win_w = max(900, self.width())
+        sb_min = max(150, min(round(190 * zoom), int(win_w * 0.22)))
+        sb_max = max(sb_min + 20, min(round(260 * zoom), int(win_w * 0.28)))
+        self.sidebar_panel.setMinimumWidth(sb_min)
+        self.sidebar_panel.setMaximumWidth(sb_max)
+
+        insp_min = max(240, min(round(300 * zoom), int(win_w * 0.30)))
+        insp_max = max(insp_min + 20, min(round(400 * zoom), int(win_w * 0.38)))
+        self.inspector_panel.setMinimumWidth(insp_min)
+        self.inspector_panel.setMaximumWidth(insp_max)
+
+    def _apply_zoom_layout(self, zoom: float, *, scale_columns: bool) -> None:
+        prev_zoom = self._applied_zoom if self._applied_zoom > 0 else 1.0
+        self.table_model.set_zoom_factor(zoom)
+        self.cell_delegate.set_zoom(zoom)
+        self.cell_delegate.set_compact(self.btn_compact_density.isChecked())
+        self.table.verticalHeader().setMinimumSectionSize(self.cell_delegate.min_row_height())
+        icon_px = max(14, round(18 * zoom))
+        self.toolbar.setIconSize(QSize(icon_px, icon_px))
+        self.search_input.setMinimumWidth(max(100, round(130 * zoom)))
+        self.search_input.setMaximumWidth(max(160, round(230 * zoom)))
+        self._update_responsive_panel_bounds(zoom)
+
+        if scale_columns and zoom != prev_zoom:
+            ratio = zoom / prev_zoom
+            for col in range(self.table_model.columnCount()):
+                cur_w = self.table.columnWidth(col)
+                if cur_w > 0:
+                    self.table.setColumnWidth(col, max(80, round(cur_w * ratio)))
+
+        self._applied_zoom = zoom
+        self.table.resizeRowsToContents()
+        self.table.viewport().update()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_responsive_panel_bounds(self.theme_manager.zoom)
 
     def _refresh_context_bar(self) -> None:
         file_lbl = self.file_filter_combo.currentText() or "All files"
         status_lbl = self.status_filter_combo.currentText() or "All"
         self.context_breadcrumb_label.setText(f"{file_lbl} / {status_lbl}")
         self.context_count_badge.setText(f"{self.proxy_model.rowCount()} keys shown")
+        if self._replace_dialog is not None and self._replace_dialog.isVisible():
+            self._replace_dialog.refresh_columns()
 
     def _toggle_inspector(self, checked: bool) -> None:
         self.inspector_panel.setVisible(checked)
@@ -1385,6 +1522,7 @@ class MainWindow(QMainWindow):
         )
 
     def open_expanded_editor(self) -> None:
+        self.commit_active_inline_editor()
         pos = self._current_source_pos()
         if pos is None or pos[1] < 1 or self.session is None:
             return
@@ -1404,6 +1542,10 @@ class MainWindow(QMainWindow):
                 glossary_entries=self.merged_glossary(),
                 editable_base=True,
                 tokens=self.theme_manager.tokens,
+                theme_manager=self.theme_manager,
+                spell_service=self.spell_service,
+                ignored_warnings=self.session.ignored_warnings,
+                on_personal_word_added=self._on_editor_personal_word_added,
             )
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 new_val = dlg.edited_text()
@@ -1429,6 +1571,11 @@ class MainWindow(QMainWindow):
             custom_enrichers=self.session.custom_enrichers,
             glossary_entries=self.merged_glossary(),
             tokens=self.theme_manager.tokens,
+            theme_manager=self.theme_manager,
+            spell_service=self.spell_service,
+            ignored_warnings=self.session.ignored_warnings,
+            on_personal_word_added=self._on_editor_personal_word_added,
+            on_add_glossary_term=self._on_editor_add_glossary_term,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             new_val = dlg.edited_text()
@@ -1701,6 +1848,64 @@ class MainWindow(QMainWindow):
             lang=lang,
             entries=self.merged_glossary(),
         )
+
+    def _editor_context_for_index(
+        self,
+        index: QModelIndex | QPersistentModelIndex,
+    ) -> EditorTextContext:
+        if self.session is None or not index.isValid():
+            return EditorTextContext(
+                key_path="",
+                lang="",
+                base_text=None,
+                is_base_cell=False,
+                glossary_entries=[],
+                custom_enrichers=[],
+                ignored_warnings=[],
+            )
+        src = self.proxy_model.mapToSource(index)
+        if not src.isValid() or src.column() < 1:
+            return EditorTextContext(
+                key_path="",
+                lang="",
+                base_text=None,
+                is_base_cell=False,
+                glossary_entries=[],
+                custom_enrichers=[],
+                ignored_warnings=[],
+            )
+        row_data = self.table_model.get_row(src.row())
+        is_base = src.column() == 1
+        lang = self.session.base_lang if is_base else self.session.target_langs[src.column() - 2]
+        return EditorTextContext(
+            key_path=row_data.key_path if row_data else "",
+            lang=lang,
+            base_text=row_data.base_text if row_data else None,
+            is_base_cell=is_base,
+            glossary_entries=self.merged_glossary(),
+            custom_enrichers=list(self.session.custom_enrichers),
+            ignored_warnings=list(self.session.ignored_warnings),
+        )
+
+    def _on_editor_personal_word_added(self, _lang: str, _word: str) -> None:
+        pos = self._current_source_pos()
+        if pos is not None:
+            self._validate_row_sync(pos[0])
+        self.revalidate_session()
+
+    def _on_editor_add_glossary_term(
+        self,
+        term: str,
+        translation: str,
+        lang: str,
+    ) -> list[GlossaryEntry] | None:
+        if self.open_glossary_dialog(
+            prefill_term=term,
+            prefill_translation=translation,
+            prefill_lang=lang,
+        ):
+            return self.merged_glossary()
+        return None
 
     def open_glossary_dialog(
         self,
@@ -2195,7 +2400,46 @@ class MainWindow(QMainWindow):
     def _clear_inspector_dynamic_actions(self) -> None:
         _clear_layout_widgets(self.inspector_dynamic_layout)
 
+    def commit_active_inline_editor(self) -> None:
+        """Commit and close any open inline QPlainTextEdit in the table before programmatic actions."""
+        focus_w = self.table.focusWidget()
+        if isinstance(focus_w, QPlainTextEdit) and self.table.viewport().isAncestorOf(focus_w):
+            self.table.commitData(focus_w)
+            self.table.closeEditor(focus_w, QAbstractItemDelegate.EndEditHint.NoHint)
+
+    def open_find_replace_dialog(self) -> FindReplaceDialog:
+        """Open or focus the modeless Find & Replace dialog (Ctrl+H)."""
+        cur = self.table.currentIndex()
+        preferred_col = cur.column() if cur.isValid() and cur.column() >= 1 else None
+        if self._replace_dialog is None:
+            self._replace_dialog = FindReplaceDialog(self)
+        self._replace_dialog.refresh_columns(preferred_col=preferred_col)
+        self._replace_dialog.show()
+        self._replace_dialog.raise_()
+        self._replace_dialog.activateWindow()
+        self._replace_dialog.find_input.setFocus()
+        self._replace_dialog.find_input.selectAll()
+        return self._replace_dialog
+
+    def begin_batch_edit(self) -> None:
+        """Defer per-row validation and disk recovery writes during a multi-cell edit macro."""
+        self._batch_editing = True
+
+    def end_batch_edit(self, edited_rows: set[int]) -> None:
+        """Finalize a multi-cell edit macro: revalidate affected rows and persist recovery once."""
+        self._batch_editing = False
+        for row in sorted(edited_rows):
+            self._validate_row_sync(row)
+        if self.session is not None:
+            self._project_unsaved = True
+            self._update_window_title()
+            write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
+            self._refresh_statusbar(self.session)
+        self._sync_inspector_to_current(include_spell_suggestions=False)
+
     def _on_cell_edited(self, row: int, _col: int) -> None:
+        if self._batch_editing:
+            return
         self._validate_row_sync(row)
         if self.session is not None:
             self._project_unsaved = True
@@ -2203,6 +2447,8 @@ class MainWindow(QMainWindow):
             write_recovery_draft(self.session, app_data_dir=self.app_data_dir)
             self._refresh_statusbar(self.session)
         self._sync_inspector_to_current(include_spell_suggestions=False)
+        if self._replace_dialog is not None and self._replace_dialog.isVisible():
+            self._replace_dialog.refresh_preview()
 
     def _on_current_changed(self, current: QModelIndex, _prev: QModelIndex) -> None:
         self._sync_inspector_to_current(current=current, include_spell_suggestions=True)

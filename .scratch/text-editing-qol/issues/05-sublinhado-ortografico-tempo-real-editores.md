@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Palavras apontadas pelo corretor ortográfico recebem sublinhado ondulado visual dentro do editor inline da tabela e do Editor Expandido, mantendo simultaneamente o destaque colorido dos tokens técnicos.
-- [ ] Spans técnicos, termos do glossário, palavras idênticas à base e palavras adicionadas ao dicionário pessoal não são sublinhados como erro.
-- [ ] Ao digitar ou corrigir uma palavra no editor, o sublinhado é atualizado de forma fluida (com debounce/cache) sem travar a digitação nem resetar a posição do cursor.
-- [ ] Quando não há dicionário Hunspell disponível para o idioma, o editor continua funcionando normalmente sem falsos sublinhados.
-- [ ] Testes automatizados validam marcação de erros ortográficos, exclusão de spans técnicos/glossário e atualização ao editar ou adicionar palavras ao dicionário pessoal.
+- [x] Palavras apontadas pelo corretor ortográfico recebem sublinhado ondulado visual dentro do editor inline da tabela e do Editor Expandido, mantendo simultaneamente o destaque colorido dos tokens técnicos.
+- [x] Spans técnicos, termos do glossário, palavras idênticas à base e palavras adicionadas ao dicionário pessoal não são sublinhados como erro.
+- [x] Ao digitar ou corrigir uma palavra no editor, o sublinhado é atualizado de forma fluida (com debounce/cache) sem travar a digitação nem resetar a posição do cursor.
+- [x] Quando não há dicionário Hunspell disponível para o idioma, o editor continua funcionando normalmente sem falsos sublinhados.
+- [x] Testes automatizados validam marcação de erros ortográficos, exclusão de spans técnicos/glossário e atualização ao editar ou adicionar palavras ao dicionário pessoal.

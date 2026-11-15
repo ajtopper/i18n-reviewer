@@ -19,6 +19,7 @@ from app.core.project_manager import (
     TableRowData,
 )
 from app.ui.commands import EditBaseCellCommand, EditCellCommand
+from app.ui.theme import DEFAULT_ZOOM_FACTOR, clamp_zoom_factor
 
 StatusFilterMode = Literal["all", "pending", "edited", "alerts", "glossary"]
 BASE_ISSUES_ROLE = int(Qt.ItemDataRole.UserRole) + 1
@@ -38,6 +39,20 @@ class TranslationTableModel(QAbstractTableModel):
         self.missing_spell_langs: set[str] = set()
         self.missing_spell_tooltips: dict[str, str] = {}
         self.undo_stack = undo_stack
+        self._zoom_factor: float = DEFAULT_ZOOM_FACTOR
+
+    def set_zoom_factor(self, zoom: float) -> None:
+        """Update model zoom factor for scaled fonts such as the KEY_PATH column."""
+        clamped = clamp_zoom_factor(zoom)
+        if clamped == self._zoom_factor:
+            return
+        self._zoom_factor = clamped
+        if self.rows:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self.rows) - 1, 0),
+                [Qt.ItemDataRole.FontRole],
+            )
 
     def set_session(self, session: PackageSession) -> None:
         self.beginResetModel()
@@ -181,7 +196,7 @@ class TranslationTableModel(QAbstractTableModel):
 
         if role == Qt.ItemDataRole.FontRole:
             if col == 0:
-                return QFont("Consolas", 9)
+                return QFont("Consolas", max(7, round(9 * self._zoom_factor)))
             cell = self.get_cell(index.row(), col)
             if cell is not None and cell.marked_for_deletion:
                 font = QFont()
