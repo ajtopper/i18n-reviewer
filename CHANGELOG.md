@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-11-14
+
+### Added
+
+- **Proportional & responsive UI zoom (`Ctrl++` / `Ctrl+=` / `Ctrl+-` / `Ctrl+0`)**: Global `80%`–`200%` zoom (`10%` steps) persisted in user settings (`ui_zoom`), status bar zoom reset/indicator button, proportional scaling across QSS styles, table/key/editor fonts, `StatusCellDelegate` badges and row heights (normal & compact), responsive sidebar/inspector bounds, and `ExpandedEditorDialog`.
+- **Protected Find & Replace (`Ctrl+H`)**: Modeless dialog scoped to visible/filtered rows and target column(s), with case-sensitive, whole-word, and technical-token protection (preserving placeholders, Handlebars, enrichers, URLs, and HTML tags while allowing translatable enricher labels), live eligible/skipped counts, `Find Next`, single `Replace`, and single-macro `Replace All` (`Ctrl+Z` / `Ctrl+Y`).
+- **Real-time spellcheck underlines & unified editor context menu**: Debounced wavy `SpellCheckUnderline` feedback (`ExtraSelections`) and unified right-click assistant inside both inline table editors and `ExpandedEditorDialog` with Hunspell suggestions, `Add '<word>' to dictionary`, missing token insertion, glossary apply/add actions, and standard clipboard editing actions.
+
 ## [0.2.0] - 2026-11-12
 
 ### Added

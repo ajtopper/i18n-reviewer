@@ -567,9 +567,9 @@ def test_ticket05_validation_filter_highlighter_token_insert_ignore_and_custom_e
     assert editor.findChildren(QSyntaxHighlighter)
     win.cell_delegate.setEditorData(editor, idx_err)
     editor.setPlainText("Olá {name}")
-    assert c_err.validation_severity is None
+    qtbot.waitUntil(lambda: c_err.validation_severity is None, timeout=1500)
     editor.setPlainText("Olá mundo")
-    assert c_err.validation_severity == "critical"
+    qtbot.waitUntil(lambda: c_err.validation_severity == "critical", timeout=1500)
 
     exp = ExpandedEditorDialog("Hello {name}", "Olá mundo", "PH_ERR", "pt-BR", win)
     qtbot.addWidget(exp)

@@ -5,12 +5,19 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from app.core.glossary import GlossaryEntry, lint_translation_glossary
-from app.core.spell_service import SpellService
+from app.core.glossary import (
+    GlossaryEntry,
+    compile_glossary,
+    detect_base_glossary_matches,
+    lint_translation_glossary,
+    mask_technical_spans,
+)
+from app.core.spell_service import SpellService, extract_folded_words
 from app.core.validator import (
     CustomEnricherRule,
     IgnoredWarning,
     ValidationIssue,
+    extract_protected_tokens,
     inspect_base_defects,
     validate_translation,
 )
@@ -75,6 +82,21 @@ class ValidationRunnable(QRunnable):
 
     def run(self) -> None:
         try:
+            compiled_glossary = (
+                compile_glossary(self.glossary_entries) if self.glossary_entries else None
+            )
+            spell_svc = self.spell_service
+            spell_avail_cache: dict[str, bool] = {}
+
+            def _spell_available(lang: str) -> bool:
+                if spell_svc is None or not lang:
+                    return False
+                avail = spell_avail_cache.get(lang)
+                if avail is None:
+                    avail = spell_svc.is_available(lang)
+                    spell_avail_cache[lang] = avail
+                return avail
+
             batch: list[RowValidationResult] = []
             for pos, snap in enumerate(self.ordered_snapshots):
                 if self._is_cancelled():
@@ -84,9 +106,41 @@ class ValidationRunnable(QRunnable):
                 base_text = snap.base_text
                 base_spell_text = snap.base_spell_text
                 cell_map_in = snap.cell_states
-                base_issues = inspect_base_defects(base_text, custom_enrichers=self.custom_enrichers)
+
+                base_tokens = (
+                    extract_protected_tokens(base_text, custom_enrichers=self.custom_enrichers)
+                    if base_text
+                    else []
+                )
+                base_issues = inspect_base_defects(
+                    base_text,
+                    custom_enrichers=self.custom_enrichers,
+                    base_tokens=base_tokens,
+                )
+                base_masked = (
+                    mask_technical_spans(
+                        base_text,
+                        custom_enrichers=self.custom_enrichers,
+                        tokens=base_tokens,
+                    )
+                    if base_text
+                    else ""
+                )
+                base_glossary_matches = (
+                    detect_base_glossary_matches(
+                        base_text,
+                        self.glossary_entries,
+                        custom_enrichers=self.custom_enrichers,
+                        compiled=compiled_glossary,
+                        masked_base=base_masked,
+                    )
+                    if (base_text and compiled_glossary is not None)
+                    else []
+                )
+                base_words_folded = extract_folded_words(base_masked) if base_masked else set()
+
                 base_spell_issues = (
-                    self.spell_service.lint_cell_spelling(
+                    spell_svc.lint_cell_spelling(
                         key_path,
                         self.base_lang,
                         None,
@@ -94,14 +148,21 @@ class ValidationRunnable(QRunnable):
                         glossary_entries=self.glossary_entries,
                         custom_enrichers=self.custom_enrichers,
                         ignored_warnings=self.ignored_warnings,
+                        compiled_glossary=compiled_glossary,
                     )
-                    if (self.spell_service is not None and self.base_lang and base_spell_text)
+                    if (base_spell_text and _spell_available(self.base_lang) and spell_svc is not None)
                     else []
                 )
+
                 cell_val_out: dict[str, list[ValidationIssue]] = {}
                 cell_gloss_out: dict[str, list[ValidationIssue]] = {}
                 cell_spell_out: dict[str, list[ValidationIssue]] = {}
                 for lang, (val, is_dirty) in cell_map_in.items():
+                    target_tokens = (
+                        extract_protected_tokens(val, custom_enrichers=self.custom_enrichers)
+                        if val
+                        else []
+                    )
                     cell_val_out[lang] = validate_translation(
                         key_path,
                         lang,
@@ -110,18 +171,38 @@ class ValidationRunnable(QRunnable):
                         custom_enrichers=self.custom_enrichers,
                         ignored_warnings=self.ignored_warnings,
                         ignore_empty=not is_dirty,
+                        base_tokens=base_tokens,
+                        target_tokens=target_tokens,
                     )
-                    cell_gloss_out[lang] = lint_translation_glossary(
-                        key_path,
-                        lang,
-                        base_text,
-                        val,
-                        self.glossary_entries,
-                        custom_enrichers=self.custom_enrichers,
-                        ignored_warnings=self.ignored_warnings,
+                    need_gloss = bool(base_glossary_matches and base_text and val)
+                    need_spell = bool(val) and _spell_available(lang)
+                    target_masked = (
+                        mask_technical_spans(
+                            val,
+                            custom_enrichers=self.custom_enrichers,
+                            tokens=target_tokens,
+                        )
+                        if (val is not None and (need_gloss or need_spell))
+                        else None
+                    )
+                    cell_gloss_out[lang] = (
+                        lint_translation_glossary(
+                            key_path,
+                            lang,
+                            base_text,
+                            val,
+                            self.glossary_entries,
+                            custom_enrichers=self.custom_enrichers,
+                            ignored_warnings=self.ignored_warnings,
+                            compiled=compiled_glossary,
+                            precomputed_base_matches=base_glossary_matches,
+                            masked_target=target_masked,
+                        )
+                        if need_gloss
+                        else []
                     )
                     cell_spell_out[lang] = (
-                        self.spell_service.lint_cell_spelling(
+                        spell_svc.lint_cell_spelling(
                             key_path,
                             lang,
                             base_text,
@@ -129,8 +210,11 @@ class ValidationRunnable(QRunnable):
                             glossary_entries=self.glossary_entries,
                             custom_enrichers=self.custom_enrichers,
                             ignored_warnings=self.ignored_warnings,
+                            compiled_glossary=compiled_glossary,
+                            masked_target=target_masked,
+                            precomputed_base_words=base_words_folded,
                         )
-                        if self.spell_service is not None
+                        if (need_spell and spell_svc is not None)
                         else []
                     )
                 batch.append(

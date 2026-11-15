@@ -12,6 +12,7 @@ from typing import Any
 from app.core.validator import (
     CustomEnricherRule,
     IgnoredWarning,
+    ProtectedToken,
     ValidationIssue,
     build_ignored_map,
     default_app_data_dir,
@@ -233,17 +234,15 @@ def import_glossary_csv(path: Path) -> list[GlossaryEntry]:
     return entries
 
 
-def _unmask_enricher_part(chars: list[str], tok_start: int, raw: str, part: str) -> None:
-    """Locate translatable part inside its syntactic slot rather than anywhere in technical body."""
+def _enricher_unmask_range(tok_start: int, raw: str, part: str) -> tuple[int, int] | None:
+    """Locate translatable part span inside its syntactic slot rather than anywhere in technical body."""
     if not part:
-        return
+        return None
     # 1) Trailing {label} after closing bracket
     suffix = "{" + part + "}"
     if raw.endswith(suffix):
         rel = len(raw) - len(part) - 1
-        for offset, ch in enumerate(part):
-            chars[tok_start + rel + offset] = ch
-        return
+        return tok_start + rel, tok_start + rel + len(part)
     # 2) @Embed caption="..." or @Check name:... or [[... #flavor]]
     for pat in (
         re.compile(r'\bcaption\s*=\s*["\'](' + re.escape(part) + r')["\']', re.IGNORECASE),
@@ -252,49 +251,187 @@ def _unmask_enricher_part(chars: list[str], tok_start: int, raw: str, part: str)
     ):
         m = pat.search(raw)
         if m:
-            for offset, ch in enumerate(part):
-                chars[tok_start + m.start(1) + offset] = ch
-            return
+            return tok_start + m.start(1), tok_start + m.end(1)
+    return None
+
+
+@dataclass(frozen=True)
+class _CompiledPhrase:
+    """Pre-compiled glossary phrase paired with lowercase text for fast substring pre-filtering."""
+
+    raw: str
+    lower: str
+    case_sensitive: bool
+    pattern: re.Pattern[str]
+
+    def present_in(self, text: str, text_lower: str) -> bool:
+        """Return True only when raw phrase appears as a contiguous substring."""
+        if self.case_sensitive:
+            return self.raw in text
+        return self.lower in text_lower
+
+
+def _make_compiled_phrase(phrase: str, *, case_sensitive: bool) -> _CompiledPhrase:
+    return _CompiledPhrase(
+        raw=phrase,
+        lower=phrase.lower(),
+        case_sensitive=case_sensitive,
+        pattern=term_boundary_pattern(phrase, case_sensitive=case_sensitive),
+    )
+
+
+class CompiledGlossary:
+    """Pre-compiled glossary matcher for batch validation, masking, and linting."""
+
+    def __init__(self, entries: list[GlossaryEntry] | tuple[GlossaryEntry, ...]) -> None:
+        self.entries: tuple[GlossaryEntry, ...] = tuple(entries)
+        items: list[tuple[int, GlossaryEntry, tuple[_CompiledPhrase, ...]]] = []
+        for entry_idx, entry in enumerate(self.entries):
+            seen: set[str] = set()
+            compiled_src: list[_CompiledPhrase] = []
+            for phrase in (entry.term, *entry.source_variants):
+                clean = phrase.strip()
+                if not clean or clean in seen:
+                    continue
+                seen.add(clean)
+                compiled_src.append(
+                    _make_compiled_phrase(clean, case_sensitive=entry.case_sensitive)
+                )
+            items.append((entry_idx, entry, tuple(compiled_src)))
+        self.source_items: tuple[tuple[int, GlossaryEntry, tuple[_CompiledPhrase, ...]], ...] = tuple(
+            items
+        )
+        self._mask_cache: dict[str, tuple[_CompiledPhrase, ...]] = {}
+        self._accepted_cache: dict[tuple[int, str], tuple[_CompiledPhrase, ...]] = {}
+
+    def mask_phrases_for(self, lang: str) -> tuple[_CompiledPhrase, ...]:
+        """Return deduplicated compiled source and target phrases active for lang."""
+        cached = self._mask_cache.get(lang)
+        if cached is not None:
+            return cached
+        phrases: list[_CompiledPhrase] = []
+        seen: set[tuple[str, bool]] = set()
+        for _idx, entry, src_phrases in self.source_items:
+            for cp in src_phrases:
+                key = (cp.raw, cp.case_sensitive)
+                if key not in seen:
+                    seen.add(key)
+                    phrases.append(cp)
+            for trans in entry.accepted_translations(lang):
+                clean = trans.strip()
+                if not clean:
+                    continue
+                key = (clean, entry.case_sensitive)
+                if key not in seen:
+                    seen.add(key)
+                    phrases.append(
+                        _make_compiled_phrase(clean, case_sensitive=entry.case_sensitive)
+                    )
+        res = tuple(phrases)
+        self._mask_cache[lang] = res
+        return res
+
+    def accepted_phrases_for(
+        self,
+        entry: GlossaryEntry,
+        lang: str,
+    ) -> tuple[_CompiledPhrase, ...]:
+        """Return compiled accepted target translation phrases for entry and lang."""
+        cache_key = (id(entry), lang)
+        cached = self._accepted_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        res = tuple(
+            _make_compiled_phrase(opt, case_sensitive=entry.case_sensitive)
+            for opt in entry.accepted_translations(lang)
+        )
+        self._accepted_cache[cache_key] = res
+        return res
+
+
+def compile_glossary(entries: list[GlossaryEntry] | tuple[GlossaryEntry, ...]) -> CompiledGlossary:
+    """Compile glossary entries into reusable pattern matchers with fast substring pre-filters."""
+    return CompiledGlossary(entries)
+
+
+def technical_char_mask(
+    text: str,
+    custom_enrichers: list[CustomEnricherRule] | None = None,
+    *,
+    tokens: list[ProtectedToken] | None = None,
+) -> list[bool]:
+    """Return per-character mask where True marks protected technical spans (excluding translatable labels)."""
+    if not text:
+        return []
+    flags = [False] * len(text)
+    toks = (
+        tokens
+        if tokens is not None
+        else extract_protected_tokens(text, custom_enrichers=custom_enrichers)
+    )
+    for tok in toks:
+        for idx in range(max(0, tok.start), min(len(text), tok.end)):
+            flags[idx] = True
+        if tok.kind == "enricher":
+            for part in tok.translatable_parts:
+                span = _enricher_unmask_range(tok.start, tok.raw, part)
+                if span is not None:
+                    for idx in range(max(0, span[0]), min(len(text), span[1])):
+                        flags[idx] = False
+    return flags
 
 
 def mask_technical_spans(
     text: str,
     custom_enrichers: list[CustomEnricherRule] | None = None,
+    *,
+    tokens: list[ProtectedToken] | None = None,
 ) -> str:
     """Replace technical spans extracted by Ticket 05 with spaces while preserving translatable labels."""
     if not text:
         return ""
-    tokens = extract_protected_tokens(text, custom_enrichers=custom_enrichers)
-    chars = list(text)
-    for tok in tokens:
-        for idx in range(tok.start, tok.end):
-            chars[idx] = " "
-        if tok.kind == "enricher":
-            for part in tok.translatable_parts:
-                _unmask_enricher_part(chars, tok.start, tok.raw, part)
-    return "".join(chars)
+    mask = technical_char_mask(text, custom_enrichers=custom_enrichers, tokens=tokens)
+    return "".join(" " if is_tech else ch for ch, is_tech in zip(text, mask))
+
+
+def _mask_with_compiled_phrases(
+    masked_text: str,
+    phrases: tuple[_CompiledPhrase, ...] | list[_CompiledPhrase],
+) -> str:
+    if not masked_text or not phrases:
+        return masked_text
+    text_lower = masked_text.lower()
+    chars: list[str] | None = None
+    for cp in phrases:
+        if not cp.present_in(masked_text, text_lower):
+            continue
+        for m in cp.pattern.finditer(masked_text):
+            if chars is None:
+                chars = list(masked_text)
+            for idx in range(m.start(), m.end()):
+                chars[idx] = " "
+    return "".join(chars) if chars is not None else masked_text
 
 
 def mask_glossary_phrases(
     masked_text: str,
     lang: str,
     entries: list[GlossaryEntry],
+    *,
+    compiled: CompiledGlossary | None = None,
 ) -> str:
     """Replace active glossary phrases (source and target accepted variants) with spaces."""
-    if not masked_text or not entries:
+    if not masked_text or (not entries and compiled is None):
         return masked_text
-    chars = list(masked_text)
+    if compiled is not None:
+        return _mask_with_compiled_phrases(masked_text, compiled.mask_phrases_for(lang))
+    phrases: list[_CompiledPhrase] = []
     for entry in entries:
-        phrases = [entry.term, *entry.source_variants, *entry.accepted_translations(lang)]
-        for phrase in phrases:
-            clean = phrase.strip()
-            if not clean:
-                continue
-            pat = term_boundary_pattern(clean, case_sensitive=entry.case_sensitive)
-            for m in pat.finditer(masked_text):
-                for idx in range(m.start(), m.end()):
-                    chars[idx] = " "
-    return "".join(chars)
+        for raw_p in (entry.term, *entry.source_variants, *entry.accepted_translations(lang)):
+            clean = raw_p.strip()
+            if clean:
+                phrases.append(_make_compiled_phrase(clean, case_sensitive=entry.case_sensitive))
+    return _mask_with_compiled_phrases(masked_text, phrases)
 
 
 def detect_base_glossary_matches(
@@ -302,31 +439,53 @@ def detect_base_glossary_matches(
     entries: list[GlossaryEntry],
     *,
     custom_enrichers: list[CustomEnricherRule] | None = None,
+    compiled: CompiledGlossary | None = None,
+    masked_base: str | None = None,
 ) -> list[GlossaryEntry]:
     """Find non-overlapping glossary entries in masked base text (longest match wins)."""
-    if not base_text or not entries:
+    if not base_text or (not entries and (compiled is None or not compiled.entries)):
         return []
-    masked = mask_technical_spans(base_text, custom_enrichers=custom_enrichers)
+    masked = (
+        masked_base
+        if masked_base is not None
+        else mask_technical_spans(base_text, custom_enrichers=custom_enrichers)
+    )
+    masked_lower = masked.lower()
     candidates: list[tuple[int, int, int, GlossaryEntry]] = []
 
-    for entry_idx, entry in enumerate(entries):
-        phrases = [entry.term, *entry.source_variants]
-        seen_phrases: set[str] = set()
-        for phrase in phrases:
-            clean = phrase.strip()
-            if not clean or clean in seen_phrases:
+    if compiled is not None:
+        source_items = compiled.source_items
+    else:
+        built: list[tuple[int, GlossaryEntry, tuple[_CompiledPhrase, ...]]] = []
+        for entry_idx, entry in enumerate(entries):
+            seen_phrases: set[str] = set()
+            src_list: list[_CompiledPhrase] = []
+            for phrase in (entry.term, *entry.source_variants):
+                clean = phrase.strip()
+                if not clean or clean in seen_phrases:
+                    continue
+                seen_phrases.add(clean)
+                src_list.append(_make_compiled_phrase(clean, case_sensitive=entry.case_sensitive))
+            built.append((entry_idx, entry, tuple(src_list)))
+        source_items = tuple(built)
+
+    for entry_idx, entry, src_phrases in source_items:
+        for cp in src_phrases:
+            if not cp.present_in(masked, masked_lower):
                 continue
-            seen_phrases.add(clean)
-            for m in term_boundary_pattern(clean, case_sensitive=entry.case_sensitive).finditer(masked):
+            for m in cp.pattern.finditer(masked):
                 s, e = m.span()
                 candidates.append((-(e - s), s, entry_idx, entry))
+
+    if not candidates:
+        return []
 
     candidates.sort(key=lambda item: (item[0], item[1], item[2]))
     occupied = [False] * len(masked)
     winning: list[tuple[int, GlossaryEntry]] = []
     seen_entry_ids: set[int] = set()
 
-    for neg_len, start, entry_idx, entry in candidates:
+    for neg_len, start, _entry_idx, entry in candidates:
         end = start - neg_len
         if any(occupied[start:end]):
             continue
@@ -349,16 +508,33 @@ def lint_translation_glossary(
     *,
     custom_enrichers: list[CustomEnricherRule] | None = None,
     ignored_warnings: list[IgnoredWarning] | None = None,
+    compiled: CompiledGlossary | None = None,
+    precomputed_base_matches: list[GlossaryEntry] | None = None,
+    masked_target: str | None = None,
 ) -> list[ValidationIssue]:
     """Check translated text against base glossary terms, returning non-blocking warning issues."""
-    if not base_text or not target_text or not entries:
+    if not base_text or not target_text or (not entries and (compiled is None or not compiled.entries)):
         return []
 
-    matched = detect_base_glossary_matches(base_text, entries, custom_enrichers=custom_enrichers)
+    matched = (
+        precomputed_base_matches
+        if precomputed_base_matches is not None
+        else detect_base_glossary_matches(
+            base_text,
+            entries,
+            custom_enrichers=custom_enrichers,
+            compiled=compiled,
+        )
+    )
     if not matched:
         return []
 
-    masked_target = mask_technical_spans(target_text, custom_enrichers=custom_enrichers)
+    masked_t = (
+        masked_target
+        if masked_target is not None
+        else mask_technical_spans(target_text, custom_enrichers=custom_enrichers)
+    )
+    masked_t_lower = masked_t.lower()
     ignored_map = build_ignored_map(ignored_warnings, key_path, lang, target_text)
     issues: list[ValidationIssue] = []
 
@@ -367,10 +543,14 @@ def lint_translation_glossary(
         if not accepted:
             continue
 
+        phrases = (
+            compiled.accepted_phrases_for(entry, lang)
+            if compiled is not None
+            else tuple(_make_compiled_phrase(opt, case_sensitive=entry.case_sensitive) for opt in accepted)
+        )
         found = any(
-            term_boundary_pattern(opt, case_sensitive=entry.case_sensitive).search(masked_target)
-            is not None
-            for opt in accepted
+            cp.present_in(masked_t, masked_t_lower) and cp.pattern.search(masked_t) is not None
+            for cp in phrases
         )
         if found:
             continue

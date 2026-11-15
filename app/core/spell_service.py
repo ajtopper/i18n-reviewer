@@ -10,7 +10,12 @@ from typing import Callable, Protocol
 
 import enchant
 
-from app.core.glossary import GlossaryEntry, mask_glossary_phrases, mask_technical_spans
+from app.core.glossary import (
+    CompiledGlossary,
+    GlossaryEntry,
+    mask_glossary_phrases,
+    mask_technical_spans,
+)
 from app.core.spell_paths import (
     default_bundled_hunspell_dir,
     is_same_file_or_dir,
@@ -64,6 +69,17 @@ def _default_dict_factory(tag: str, pwl_path: Path, broker: enchant.Broker) -> E
     if not pwl_path.exists():
         pwl_path.write_text("", encoding="utf-8")
     return enchant.DictWithPWL(tag, str(pwl_path), broker=broker)
+
+
+def extract_folded_words(masked_text: str | None) -> set[str]:
+    """Extract normalized casefolded word forms from pre-masked prose for base-word exemption."""
+    words_folded: set[str] = set()
+    if not masked_text:
+        return words_folded
+    for tok in _WORD_RE.findall(masked_text):
+        words_folded.add(tok.casefold())
+        words_folded.add(tok.strip("-'’").casefold())
+    return words_folded
 
 
 class SpellService:
@@ -231,6 +247,97 @@ class SpellService:
                 del self._word_cache[k]
         return True
 
+    def _unknown_queries_for_words(self, lang: str, words: list[str]) -> set[str]:
+        """Batch-check candidate words for lang under a single lock acquisition."""
+        if not words:
+            return set()
+        unique_queries = list(dict.fromkeys(w.replace("’", "'") for w in words))
+        unknown_queries: set[str] = set()
+        with self._lock:
+            tag, dct = self._ensure_loaded(lang)
+            if dct is None:
+                return set()
+            word_cache = self._word_cache
+            for query in unique_queries:
+                cache_key = (tag, query)
+                cached = word_cache.get(cache_key)
+                if cached is None:
+                    cached = bool(dct.check(query))
+                    if len(word_cache) > 50000:
+                        word_cache.clear()
+                    word_cache[cache_key] = cached
+                if not cached:
+                    unknown_queries.add(query)
+        return unknown_queries
+
+    def find_unknown_word_spans(
+        self,
+        lang: str,
+        target_text: str | None,
+        *,
+        base_text: str | None = None,
+        glossary_entries: list[GlossaryEntry] | None = None,
+        custom_enrichers: list[CustomEnricherRule] | None = None,
+        ignored_warnings: list[IgnoredWarning] | None = None,
+        key_path: str = "",
+        compiled_glossary: CompiledGlossary | None = None,
+        masked_target: str | None = None,
+        precomputed_base_words: set[str] | None = None,
+    ) -> list[tuple[int, int, str]]:
+        """Return all (start, end, word) spans of unknown words in target_text."""
+        if not target_text or not self.is_available(lang):
+            return []
+
+        masked = (
+            masked_target
+            if masked_target is not None
+            else mask_technical_spans(target_text, custom_enrichers=custom_enrichers)
+        )
+        if glossary_entries or compiled_glossary is not None:
+            masked = mask_glossary_phrases(
+                masked,
+                lang,
+                glossary_entries or [],
+                compiled=compiled_glossary,
+            )
+
+        if precomputed_base_words is not None:
+            base_words_folded = precomputed_base_words
+        elif base_text:
+            base_masked = mask_technical_spans(base_text, custom_enrichers=custom_enrichers)
+            base_words_folded = extract_folded_words(base_masked)
+        else:
+            base_words_folded = set()
+
+        ignored_map = (
+            build_ignored_map(ignored_warnings, key_path, lang, target_text)
+            if ignored_warnings and key_path
+            else {}
+        )
+
+        candidates: list[tuple[int, int, str]] = []
+        for match in _WORD_RE.finditer(masked):
+            word = match.group(0)
+            clean = word.strip("-'’")
+            if not clean or len(clean) <= 2:
+                continue
+            if any(ch.isdigit() for ch in clean):
+                continue
+            if clean.isupper():
+                continue
+            if word.casefold() in base_words_folded or clean.casefold() in base_words_folded:
+                continue
+            if f"spell:{word}" in ignored_map:
+                continue
+            candidates.append((match.start(), match.end(), word))
+
+        if not candidates:
+            return []
+        unknown_queries = self._unknown_queries_for_words(lang, [w for _, _, w in candidates])
+        if not unknown_queries:
+            return []
+        return [cand for cand in candidates if cand[2].replace("’", "'") in unknown_queries]
+
     def check_text(
         self,
         lang: str,
@@ -239,38 +346,25 @@ class SpellService:
         base_text: str | None = None,
         glossary_entries: list[GlossaryEntry] | None = None,
         custom_enrichers: list[CustomEnricherRule] | None = None,
+        compiled_glossary: CompiledGlossary | None = None,
+        masked_target: str | None = None,
+        precomputed_base_words: set[str] | None = None,
     ) -> list[str]:
         """Return ordered unknown words in target_text after filtering tech spans, noise, base words, and glossary."""
-        if not target_text or not self.is_available(lang):
-            return []
-
-        masked = mask_technical_spans(target_text, custom_enrichers=custom_enrichers)
-        if glossary_entries:
-            masked = mask_glossary_phrases(masked, lang, glossary_entries)
-
-        base_words_folded: set[str] = set()
-        if base_text:
-            base_masked = mask_technical_spans(base_text, custom_enrichers=custom_enrichers)
-            for btok in _WORD_RE.findall(base_masked):
-                base_words_folded.add(btok.casefold())
-                base_words_folded.add(btok.strip("-'’").casefold())
-
         unknown: list[str] = []
         seen: set[str] = set()
-        for word in _WORD_RE.findall(masked):
-            clean = word.strip("-'’")
-            if not clean or len(clean) <= 2:
-                continue
-            if any(ch.isdigit() for ch in clean):
-                continue
-            if clean.isupper():
-                continue
+        for _start, _end, word in self.find_unknown_word_spans(
+            lang,
+            target_text,
+            base_text=base_text,
+            glossary_entries=glossary_entries,
+            custom_enrichers=custom_enrichers,
+            compiled_glossary=compiled_glossary,
+            masked_target=masked_target,
+            precomputed_base_words=precomputed_base_words,
+        ):
             norm_key = word.casefold()
-            if norm_key in base_words_folded or clean.casefold() in base_words_folded:
-                continue
-            if norm_key in seen:
-                continue
-            if not self.check(lang, word):
+            if norm_key not in seen:
                 seen.add(norm_key)
                 unknown.append(word)
         return unknown
@@ -285,6 +379,9 @@ class SpellService:
         glossary_entries: list[GlossaryEntry] | None = None,
         custom_enrichers: list[CustomEnricherRule] | None = None,
         ignored_warnings: list[IgnoredWarning] | None = None,
+        compiled_glossary: CompiledGlossary | None = None,
+        masked_target: str | None = None,
+        precomputed_base_words: set[str] | None = None,
     ) -> list[ValidationIssue]:
         """Check cell spelling without calling suggest(), returning non-blocking warning ValidationIssues."""
         unknown = self.check_text(
@@ -293,6 +390,9 @@ class SpellService:
             base_text=base_text,
             glossary_entries=glossary_entries,
             custom_enrichers=custom_enrichers,
+            compiled_glossary=compiled_glossary,
+            masked_target=masked_target,
+            precomputed_base_words=precomputed_base_words,
         )
         if not unknown:
             return []

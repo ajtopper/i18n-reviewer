@@ -19,9 +19,15 @@ from app.core.project_manager import (
     TableRowData,
 )
 from app.ui.commands import EditBaseCellCommand, EditCellCommand
+from app.ui.theme import DEFAULT_ZOOM_FACTOR, clamp_zoom_factor
 
 StatusFilterMode = Literal["all", "pending", "edited", "alerts", "glossary"]
 BASE_ISSUES_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+_DISPLAY_ROLE = int(Qt.ItemDataRole.DisplayRole)
+_EDIT_ROLE = int(Qt.ItemDataRole.EditRole)
+_FONT_ROLE = int(Qt.ItemDataRole.FontRole)
+_FOREGROUND_ROLE = int(Qt.ItemDataRole.ForegroundRole)
+_USER_ROLE = int(Qt.ItemDataRole.UserRole)
 
 
 class TranslationTableModel(QAbstractTableModel):
@@ -38,6 +44,27 @@ class TranslationTableModel(QAbstractTableModel):
         self.missing_spell_langs: set[str] = set()
         self.missing_spell_tooltips: dict[str, str] = {}
         self.undo_stack = undo_stack
+        self._zoom_factor: float = DEFAULT_ZOOM_FACTOR
+        self._key_font = QFont("Consolas", max(7, round(9 * self._zoom_factor)))
+        self._italic_font = QFont()
+        self._italic_font.setItalic(True)
+        self._strike_font = QFont()
+        self._strike_font.setStrikeOut(True)
+        self._muted_color = QColor("#6b7280")
+
+    def set_zoom_factor(self, zoom: float) -> None:
+        """Update model zoom factor for scaled fonts such as the KEY_PATH column."""
+        clamped = clamp_zoom_factor(zoom)
+        if clamped == self._zoom_factor:
+            return
+        self._zoom_factor = clamped
+        self._key_font = QFont("Consolas", max(7, round(9 * clamped)))
+        if self.rows:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self.rows) - 1, 0),
+                [Qt.ItemDataRole.FontRole],
+            )
 
     def set_session(self, session: PackageSession) -> None:
         self.beginResetModel()
@@ -145,20 +172,15 @@ class TranslationTableModel(QAbstractTableModel):
     ) -> Any:
         if not index.isValid():
             return None
-        row_data = self.rows[index.row()]
+        row = index.row()
         col = index.column()
+        row_data = self.rows[row]
 
-        if role == Qt.ItemDataRole.EditRole:
-            if col < 1:
-                return None
-            cell = self.get_cell(index.row(), col)
-            return cell.local_value or "" if cell is not None else ""
-
-        if role == Qt.ItemDataRole.DisplayRole:
+        if role == _DISPLAY_ROLE:
             if col == 0:
                 return row_data.key_path
             if col == 1:
-                cell = self.get_cell(index.row(), 1)
+                cell = row_data.base_cell
                 if cell is not None and cell.kind == CellKind.NON_STRING and row_data.base_text is None:
                     return f"[non-string: {cell.raw_type}]"
                 if row_data.base_text is None:
@@ -166,7 +188,8 @@ class TranslationTableModel(QAbstractTableModel):
                 if row_data.base_text == "":
                     return '""'
                 return row_data.base_text
-            cell = self.get_cell(index.row(), col)
+            idx = col - 2
+            cell = row_data.cells.get(self.target_langs[idx]) if 0 <= idx < len(self.target_langs) else None
             if cell is None:
                 return ""
             if cell.kind == CellKind.NOT_APPLICABLE:
@@ -179,14 +202,28 @@ class TranslationTableModel(QAbstractTableModel):
                 return '""'
             return cell.local_value or ""
 
-        if role == Qt.ItemDataRole.FontRole:
+        if role == _USER_ROLE:
+            if col < 1:
+                return None
+            if col == 1:
+                return row_data.base_cell
+            idx = col - 2
+            return row_data.cells.get(self.target_langs[idx]) if 0 <= idx < len(self.target_langs) else None
+
+        if role == _FONT_ROLE:
             if col == 0:
-                return QFont("Consolas", 9)
-            cell = self.get_cell(index.row(), col)
+                return self._key_font
+            cell = (
+                row_data.base_cell
+                if col == 1
+                else (
+                    row_data.cells.get(self.target_langs[col - 2])
+                    if 0 <= col - 2 < len(self.target_langs)
+                    else None
+                )
+            )
             if cell is not None and cell.marked_for_deletion:
-                font = QFont()
-                font.setStrikeOut(True)
-                return font
+                return self._strike_font
             is_italic = (col == 1 and row_data.base_text is None) or (
                 cell is not None
                 and (
@@ -195,12 +232,21 @@ class TranslationTableModel(QAbstractTableModel):
                 )
             )
             if is_italic:
-                font = QFont()
-                font.setItalic(True)
-                return font
+                return self._italic_font
+            return None
 
-        if role == Qt.ItemDataRole.ForegroundRole:
-            cell = self.get_cell(index.row(), col)
+        if role == _FOREGROUND_ROLE:
+            if col < 1:
+                return None
+            cell = (
+                row_data.base_cell
+                if col == 1
+                else (
+                    row_data.cells.get(self.target_langs[col - 2])
+                    if 0 <= col - 2 < len(self.target_langs)
+                    else None
+                )
+            )
             is_muted = (col == 1 and row_data.base_text is None) or (
                 cell is not None
                 and (
@@ -209,10 +255,22 @@ class TranslationTableModel(QAbstractTableModel):
                 )
             )
             if is_muted:
-                return QColor("#6b7280")
+                return self._muted_color
+            return None
 
-        if role == Qt.ItemDataRole.UserRole:
-            return self.get_cell(index.row(), col)
+        if role == _EDIT_ROLE:
+            if col < 1:
+                return None
+            cell = (
+                row_data.base_cell
+                if col == 1
+                else (
+                    row_data.cells.get(self.target_langs[col - 2])
+                    if 0 <= col - 2 < len(self.target_langs)
+                    else None
+                )
+            )
+            return cell.local_value or "" if cell is not None else ""
 
         if role == BASE_ISSUES_ROLE and col == 1:
             return row_data.base_issues

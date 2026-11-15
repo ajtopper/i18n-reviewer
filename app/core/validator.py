@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+from functools import lru_cache
 import hashlib
 import os
 from pathlib import Path
@@ -152,8 +153,9 @@ def default_app_data_dir() -> Path:
     return Path.home() / ".config" / "i18n-reviewer"
 
 
+@lru_cache(maxsize=4096)
 def term_boundary_pattern(phrase: str, *, case_sensitive: bool = True) -> re.Pattern[str]:
-    """Compile a Unicode word-boundary regex for phrase matching or replacement."""
+    """Compile and cache a Unicode word-boundary regex for phrase matching or replacement."""
     flags = 0 if case_sensitive else re.IGNORECASE
     return re.compile(rf"(?<!\w){re.escape(phrase)}(?!\w)", flags)
 
@@ -579,11 +581,17 @@ def _find_html_balance_errors(tokens: list[ProtectedToken]) -> list[str]:
 def inspect_base_defects(
     base_text: str | None,
     custom_enrichers: list[CustomEnricherRule] | None = None,
+    *,
+    base_tokens: list[ProtectedToken] | None = None,
 ) -> list[ValidationIssue]:
     """Detect informational defects in the base source string (never blocks publishing)."""
     if not base_text:
         return []
-    tokens = extract_protected_tokens(base_text, custom_enrichers=custom_enrichers)
+    tokens = (
+        base_tokens
+        if base_tokens is not None
+        else extract_protected_tokens(base_text, custom_enrichers=custom_enrichers)
+    )
     placeholder_names = {t.tech_key for t in tokens if t.kind == "placeholder"}
     enricher_labels = {
         part.strip()
@@ -687,6 +695,8 @@ def validate_translation(
     custom_enrichers: list[CustomEnricherRule] | None = None,
     ignored_warnings: list[IgnoredWarning] | None = None,
     ignore_empty: bool = True,
+    base_tokens: list[ProtectedToken] | None = None,
+    target_tokens: list[ProtectedToken] | None = None,
 ) -> list[ValidationIssue]:
     """Validate target translation against base tokens using cascade rules and ignored exceptions."""
     if not base_text or target_text is None:
@@ -694,8 +704,10 @@ def validate_translation(
     if ignore_empty and target_text == "":
         return []
 
-    base_tokens = extract_protected_tokens(base_text, custom_enrichers=custom_enrichers)
-    target_tokens = extract_protected_tokens(target_text, custom_enrichers=custom_enrichers)
+    if base_tokens is None:
+        base_tokens = extract_protected_tokens(base_text, custom_enrichers=custom_enrichers)
+    if target_tokens is None:
+        target_tokens = extract_protected_tokens(target_text, custom_enrichers=custom_enrichers)
     ctx = _IgnoreContext(
         ignored_warnings=ignored_warnings or [],
         key_path=key_path,
