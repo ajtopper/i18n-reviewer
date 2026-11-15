@@ -10,4 +10,3 @@
 - [x] É possível alternar ao vivo entre o motor **Qt 6 Nativo** (Claro/Escuro) e **`qt-material`** (Claro/Escuro) sem reiniciar o protótipo.
 - [x] A amostra exibe tabela multi-idioma com badges de status legíveis, sidebar de filtros/arquivos, toolbar com busca e botão `Send to Production`, e Inspector em cards com `Mark Reviewed + Next`.
 - [x] O contraste de texto, badges e controles é legível tanto no modo Claro quanto no modo Escuro em ambos os motores.
-
