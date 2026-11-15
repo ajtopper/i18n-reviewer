@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Digitar rapidamente em uma célula inline não dispara validação completa, mesclagem de glossário nem recriação de botões do inspetor a cada tecla, mantendo os diagnósticos e botões atualizados após a breve pausa de debounce.
-- [ ] Alterações no glossário global ou do projeto invalidam imediatamente o cache de glossário na janela principal para que o editor inline, menu de contexto e inspetor reflitam os termos atualizados.
-- [ ] Os contadores exibidos na barra de status permanecem idênticos após carregamento, edição, revisão em lote e finalização da validação.
-- [ ] Edições consecutivas não gravam o JSON de auto-recovery sincronamente a cada célula, mas qualquer rascunho pendente é gravado imediatamente antes de salvar, publicar, sincronizar, restaurar backup ou fechar a aplicação.
-- [ ] Testes automatizados no seam `MainWindow` + `QtBot` validam o debounce inline, a atualização correta do inspetor e o flush garantido do recovery draft.
+- [x] Digitar rapidamente em uma célula inline não dispara validação completa, mesclagem de glossário nem recriação de botões do inspetor a cada tecla, mantendo os diagnósticos e botões atualizados após a breve pausa de debounce.
+- [x] Alterações no glossário global ou do projeto invalidam imediatamente o cache de glossário na janela principal para que o editor inline, menu de contexto e inspetor reflitam os termos atualizados.
+- [x] Os contadores exibidos na barra de status permanecem idênticos após carregamento, edição, revisão em lote e finalização da validação.
+- [x] Edições consecutivas não gravam o JSON de auto-recovery sincronamente a cada célula, mas qualquer rascunho pendente é gravado imediatamente antes de salvar, publicar, sincronizar, restaurar backup ou fechar a aplicação.
+- [x] Testes automatizados no seam `MainWindow` + `QtBot` validam o debounce inline, a atualização correta do inspetor e o flush garantido do recovery draft.

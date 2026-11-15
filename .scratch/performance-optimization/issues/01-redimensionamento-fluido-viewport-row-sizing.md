@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Redimensionar a janela principal continuamente em uma sessão com 3.000+ chaves com textos longos/multilinha mantém a UI responsiva (10 eventos consecutivos de resize concluem dentro do orçamento definido nos testes, sem travamento).
-- [ ] Carregar uma sessão grande exibe a tabela rapidamente sem recalcular alturas de linhas fora da tela.
-- [ ] Linhas visíveis no viewport com texto quebrado ou multilinha adaptam sua altura entre o mínimo da densidade/zoom e o teto máximo (~110 px escalado por zoom), inclusive após rolagem vertical, troca de filtro, alternância de densidade `Compact`, zoom (`Ctrl++`/`Ctrl+-`/`Ctrl+0`) e edição pontual de célula.
-- [ ] O redimensionamento da janela não dispara invalidações extras de layout nos painéis laterais quando suas larguras mínimas/máximas calculadas permanecem inalteradas.
-- [ ] Testes automatizados ponta a ponta no seam `MainWindow` + `QtBot` validam o orçamento de tempo de resize e o comportamento correto das alturas visíveis, mantendo toda a suíte existente verde.
+- [x] Redimensionar a janela principal continuamente em uma sessão com 3.000+ chaves com textos longos/multilinha mantém a UI responsiva (10 eventos consecutivos de resize concluem dentro do orçamento definido nos testes, sem travamento).
+- [x] Carregar uma sessão grande exibe a tabela rapidamente sem recalcular alturas de linhas fora da tela.
+- [x] Linhas visíveis no viewport com texto quebrado ou multilinha adaptam sua altura entre o mínimo da densidade/zoom e o teto máximo (~110 px escalado por zoom), inclusive após rolagem vertical, troca de filtro, alternância de densidade `Compact`, zoom (`Ctrl++`/`Ctrl+-`/`Ctrl+0`) e edição pontual de célula.
+- [x] O redimensionamento da janela não dispara invalidações extras de layout nos painéis laterais quando suas larguras mínimas/máximas calculadas permanecem inalteradas.
+- [x] Testes automatizados ponta a ponta no seam `MainWindow` + `QtBot` validam o orçamento de tempo de resize e o comportamento correto das alturas visíveis, mantendo toda a suíte existente verde.

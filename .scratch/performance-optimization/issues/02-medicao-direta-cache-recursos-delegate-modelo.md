@@ -4,9 +4,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] O cálculo de `sizeHint` para células multilinha ou com quebra de linha respeita exatamente o padding, a altura da faixa de badge e os limites `min_row_height()` e `max_row_height()` em qualquer nível de zoom e modo `Compact`.
-- [ ] Variar continuamente a largura de uma coluna não gera crescimento descontrolado do cache de alturas do delegate nem limpezas em cascata durante o arrasto.
-- [ ] Pintura e consulta de `FontRole`/`ForegroundRole` reutilizam recursos Qt cacheados sem instanciar novas fontes, métricas ou cores por célula pintada/lida.
-- [ ] Testes automatizados no seam `MainWindow` + `QtBot` verificam preservação visual de fontes, cores, badges e teto de altura nas células, sem regressões na suíte de tema e zoom.
+- [x] O cálculo de `sizeHint` para células multilinha ou com quebra de linha respeita exatamente o padding, a altura da faixa de badge e os limites `min_row_height()` e `max_row_height()` em qualquer nível de zoom e modo `Compact`.
+- [x] Variar continuamente a largura de uma coluna não gera crescimento descontrolado do cache de alturas do delegate nem limpezas em cascata durante o arrasto.
+- [x] Pintura e consulta de `FontRole`/`ForegroundRole` reutilizam recursos Qt cacheados sem instanciar novas fontes, métricas ou cores por célula pintada/lida.
+- [x] Testes automatizados no seam `MainWindow` + `QtBot` verificam preservação visual de fontes, cores, badges e teto de altura nas células, sem regressões na suíte de tema e zoom.
